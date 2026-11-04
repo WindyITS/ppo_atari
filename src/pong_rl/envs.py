@@ -10,6 +10,7 @@ def make_env(
     run_name: str,
     use_fog: bool = False,
     mask_enemy: bool = False,
+    frame_stack: int = 4,
 ):
     def thunk():
         # Match DeepMind 2013/2015 & CleanRL PongNoFrameskip-v4:
@@ -40,7 +41,8 @@ def make_env(
             env = FogWrapper(env)
         if mask_enemy:
             env = EnemyMaskWrapper(env)
-        env = gym.wrappers.FrameStackObservation(env, stack_size=4)
+        # stack_size=1 still adds the channel dim: (1, 84, 84)
+        env = gym.wrappers.FrameStackObservation(env, stack_size=frame_stack)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
 

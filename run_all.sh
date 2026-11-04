@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Train all 4 conditions (fog off/on x enemy mask off/on) across 3 seeds = 12 runs.
 # Usage:
-#   bash run_all.sh                 # default: runs 6 jobs in parallel at a time (2 waves of 6)
+#   bash run_all.sh                 # default: CNN, runs 6 jobs in parallel at a time (2 waves of 6)
+#   ARCH=lstm bash run_all.sh       # CNN + LSTM (1 frame per step) instead of the frame-stacked CNN
 #   MAX_PARALLEL=12 bash run_all.sh # run all 12 simultaneously
 
 set -euo pipefail
@@ -9,6 +10,7 @@ set -euo pipefail
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
+ARCH="${ARCH:-cnn}"
 MAX_PARALLEL="${MAX_PARALLEL:-6}"
 TIMESTEPS="${TIMESTEPS:-5000000}"
 SEEDS=(1 2 3)
@@ -22,10 +24,11 @@ for seed in "${SEEDS[@]}"; do
     for mask_flag in "" "--mask-enemy"; do
       fog_id=0; [[ -n "$fog_flag" ]] && fog_id=1
       mask_id=0; [[ -n "$mask_flag" ]] && mask_id=1
-      tag="fog_${fog_id}_mask_${mask_id}_seed_${seed}"
+      tag="${ARCH}_fog_${fog_id}_mask_${mask_id}_seed_${seed}"
 
       echo "Launching ${tag} ..."
       uv run pong-rl \
+        --arch "${ARCH}" \
         --seed "${seed}" \
         --total-timesteps "${TIMESTEPS}" \
         ${fog_flag} ${mask_flag} \

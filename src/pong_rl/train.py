@@ -1,5 +1,6 @@
-# Adapted from CleanRL's ppo_atari.py:
+# Adapted from CleanRL's ppo_atari.py and ppo_atari_lstm.py:
 # https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
+# https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_atari_lstmpy
 import argparse
 import os
 import random
@@ -15,9 +16,12 @@ import torch.optim as optim
 import wandb
 
 from pong_rl.envs import make_env
-from pong_rl.models import Agent
+from pong_rl.models import Agent, LSTMAgent, zero_lstm_state
 
 gym.register_envs(ale_py)
+
+# Frames per observation: the CNN sees motion through stacking, the LSTM through its memory
+FRAME_STACK = {"cnn": 4, "lstm": 1}
 
 
 @dataclass
@@ -34,6 +38,7 @@ class Args:
 
     # Algorithm specific arguments
     env_id: str = "ALE/Pong-v5"
+    arch: str = "cnn"
     use_fog: bool = False
     mask_enemy: bool = False
     total_timesteps: int = 5_000_000
@@ -63,6 +68,12 @@ def parse_args() -> Args:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp-name", type=str, default="ppo_pong")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--arch",
+        choices=list(FRAME_STACK),
+        default="cnn",
+        help="cnn: Nature CNN on 4 stacked frames; lstm: Nature CNN + LSTM on 1 frame per step",
+    )
     parser.add_argument("--use-fog", action="store_true", help="Enable FogWrapper on agent half")
     parser.add_argument("--mask-enemy", action="store_true", help="Enable EnemyMaskWrapper on enemy paddle")
     parser.add_argument("--total-timesteps", type=int, default=5_000_000)
@@ -77,6 +88,7 @@ def parse_args() -> Args:
     return Args(
         exp_name=parsed.exp_name,
         seed=parsed.seed,
+        arch=parsed.arch,
         use_fog=parsed.use_fog,
         mask_enemy=parsed.mask_enemy,
         total_timesteps=parsed.total_timesteps,
@@ -97,16 +109,19 @@ def main():
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    if args.arch == "lstm":
+        assert args.num_envs % args.num_minibatches == 0, "LSTM minibatches are whole envs"
 
     condition = f"fog_{int(args.use_fog)}_mask_{int(args.mask_enemy)}"
-    run_name = f"pong__{condition}__seed_{args.seed}__{int(time.time())}"
+    tag = f"{args.arch}_{condition}"
+    run_name = f"pong__{tag}__seed_{args.seed}__{int(time.time())}"
 
     if args.track:
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             config=vars(args),
-            group=condition,
+            group=tag,
             name=run_name,
             save_code=True,
         )
@@ -137,6 +152,7 @@ def main():
                 run_name,
                 use_fog=args.use_fog,
                 mask_enemy=args.mask_enemy,
+                frame_stack=FRAME_STACK[args.arch],
             )
             for i in range(args.num_envs)
         ],
@@ -146,7 +162,7 @@ def main():
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     assert envs.single_observation_space.shape is not None
 
-    agent = Agent(envs).to(device)
+    agent = LSTMAgent(envs).to(device) if args.arch == "lstm" else Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Storage setup: (128 steps, 8 envs, ...)
@@ -163,10 +179,15 @@ def main():
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.tensor(next_obs, dtype=torch.float32, device=device)
     next_done = torch.zeros(args.num_envs, device=device)
+    # LSTM memory, carried across steps and across rollouts (unused by the CNN agent)
+    next_lstm_state = zero_lstm_state(args.num_envs, device)
 
     os.makedirs("checkpoints", exist_ok=True)
 
     for iteration in range(1, args.num_iterations + 1):
+        # The update replays each env's rollout through the LSTM starting from this state
+        initial_lstm_state = (next_lstm_state[0].clone(), next_lstm_state[1].clone())
+
         # 1. Learning rate annealing
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -180,7 +201,12 @@ def main():
             dones[step] = next_done
 
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                if isinstance(agent, LSTMAgent):
+                    action, logprob, _, value, next_lstm_state = agent.get_action_and_value(
+                        next_obs, next_lstm_state, next_done
+                    )
+                else:
+                    action, logprob, _, value = agent.get_action_and_value(next_obs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -199,7 +225,7 @@ def main():
                     if has_ep:
                         ep_return = float(final_info["episode"]["r"][i])
                         ep_length = int(final_info["episode"]["l"][i])
-                        print(f"[{condition}|s{args.seed}] step={global_step}, return={ep_return}")
+                        print(f"[{tag}|s{args.seed}] step={global_step}, return={ep_return}")
                         if args.track:
                             wandb.log(
                                 {
@@ -211,7 +237,10 @@ def main():
 
         # 3. GAE (Generalized Advantage Estimation)
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            if isinstance(agent, LSTMAgent):
+                next_value = agent.get_value(next_obs, next_lstm_state, next_done).reshape(1, -1)
+            else:
+                next_value = agent.get_value(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -229,22 +258,40 @@ def main():
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_dones = dones.reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
-        # 4. PPO Update phase: 4 epochs over the 1024 steps in minibatches of 256
+        # 4. PPO Update phase: 4 epochs over the 1024 steps in minibatches of 256.
+        # The CNN samples random steps; the LSTM must replay whole sequences in order,
+        # so each of its minibatches is all 128 steps of num_envs / num_minibatches envs.
         b_inds = np.arange(args.batch_size)
+        env_inds = np.arange(args.num_envs)
+        envs_per_batch = args.num_envs // args.num_minibatches
+        flat_inds = np.arange(args.batch_size).reshape(args.num_steps, args.num_envs)
         clipfracs = []
         for epoch in range(args.update_epochs):
-            np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
-                end = start + args.minibatch_size
-                mb_inds = b_inds[start:end]
-
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
-                    b_obs[mb_inds], b_actions.long()[mb_inds]
-                )
+            if isinstance(agent, LSTMAgent):
+                np.random.shuffle(env_inds)
+            else:
+                np.random.shuffle(b_inds)
+            for mb in range(args.num_minibatches):
+                if isinstance(agent, LSTMAgent):
+                    mb_env_inds = env_inds[mb * envs_per_batch : (mb + 1) * envs_per_batch]
+                    # Time-major (step 0 of each env, step 1 of each env, ...), as get_states expects
+                    mb_inds = flat_inds[:, mb_env_inds].ravel()
+                    _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
+                        b_obs[mb_inds],
+                        (initial_lstm_state[0][:, mb_env_inds], initial_lstm_state[1][:, mb_env_inds]),
+                        b_dones[mb_inds],
+                        b_actions.long()[mb_inds],
+                    )
+                else:
+                    mb_inds = b_inds[mb * args.minibatch_size : (mb + 1) * args.minibatch_size]
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                        b_obs[mb_inds], b_actions.long()[mb_inds]
+                    )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -294,7 +341,7 @@ def main():
         sps = int(global_step / (time.time() - start_time))
 
         if iteration % 25 == 0:
-            print(f"[{condition}|s{args.seed}] iter={iteration}/{args.num_iterations}, step={global_step}, SPS={sps}")
+            print(f"[{tag}|s{args.seed}] iter={iteration}/{args.num_iterations}, step={global_step}, SPS={sps}")
 
         if args.track:
             wandb.log(
@@ -313,11 +360,12 @@ def main():
             )
 
     if args.save_model:
-        ckpt_path = f"checkpoints/{condition}_seed_{args.seed}.pt"
+        ckpt_path = f"checkpoints/{tag}_seed_{args.seed}.pt"
         torch.save(
             {
                 "model_state_dict": agent.state_dict(),
                 "args": vars(args),
+                "arch": args.arch,
                 "condition": condition,
                 "seed": args.seed,
             },
