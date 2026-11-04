@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Train all 4 conditions (fog off/on x enemy mask off/on) across 3 seeds = 12 runs.
 # Usage:
-#   bash run_all.sh                 # default: runs 4 jobs in parallel at a time (3 waves of 4)
-#   MAX_PARALLEL=6 bash run_all.sh  # run 6 jobs in parallel at a time (2 waves of 6)
+#   bash run_all.sh                 # default: runs 6 jobs in parallel at a time (2 waves of 6)
 #   MAX_PARALLEL=12 bash run_all.sh # run all 12 simultaneously
 
 set -euo pipefail
@@ -25,7 +24,7 @@ for seed in "${SEEDS[@]}"; do
       tag="fog_${fog_id}_mask_${mask_id}_seed_${seed}"
 
       echo "Launching ${tag} ..."
-      python ppo_atari.py \
+      uv run pong-rl \
         --seed "${seed}" \
         --total-timesteps "${TIMESTEPS}" \
         ${fog_flag} ${mask_flag} \

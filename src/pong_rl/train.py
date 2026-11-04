@@ -13,9 +13,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import wandb
-from torch.distributions.categorical import Categorical
 
-from wrappers import EnemyMaskWrapper, FogWrapper
+from pong_rl.envs import make_env
+from pong_rl.models import Agent
 
 gym.register_envs(ale_py)
 
@@ -74,7 +74,7 @@ def parse_args() -> Args:
     parser.add_argument("--save-model", action=argparse.BooleanOptionalAction, default=True)
     parsed = parser.parse_args()
 
-    args = Args(
+    return Args(
         exp_name=parsed.exp_name,
         seed=parsed.seed,
         use_fog=parsed.use_fog,
@@ -87,84 +87,9 @@ def parse_args() -> Args:
         capture_video=parsed.capture_video,
         save_model=parsed.save_model,
     )
-    return args
 
 
-def make_env(
-    env_id: str,
-    idx: int,
-    capture_video: bool,
-    run_name: str,
-    use_fog: bool = False,
-    mask_enemy: bool = False,
-):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, frameskip=1, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id, frameskip=1)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = gym.wrappers.AtariPreprocessing(
-            env,
-            noop_max=30,
-            frame_skip=4,
-            screen_size=84,
-            terminal_on_life_loss=False,
-            grayscale_obs=True,
-        )
-        if use_fog:
-            env = FogWrapper(env)
-        if mask_enemy:
-            env = EnemyMaskWrapper(env)
-        env = gym.wrappers.FrameStackObservation(env, stack_size=4)
-        return env
-
-    return thunk
-
-
-def layer_init(layer: nn.Conv2d | nn.Linear, std: float = np.sqrt(2), bias_const: float = 0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    if layer.bias is not None:
-        torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-class Agent(nn.Module):
-    def __init__(self, envs: gym.vector.VectorEnv):
-        super().__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
-            nn.ReLU(),
-        )
-        assert isinstance(envs.single_action_space, gym.spaces.Discrete)
-        self.actor = layer_init(nn.Linear(512, int(envs.single_action_space.n)), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1.0)
-
-    def get_hidden(self, x: torch.Tensor) -> torch.Tensor:
-        """Returns the 512-dim latent representation (useful for linear probing)."""
-        return self.network(x / 255.0)
-
-    def get_value(self, x: torch.Tensor) -> torch.Tensor:
-        return self.critic(self.get_hidden(x))
-
-    def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor | None = None):
-        hidden = self.get_hidden(x)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
-
-
-if __name__ == "__main__":
+def main():
     # Limit CPU thread contention when running multiple parallel training jobs
     torch.set_num_threads(1)
 
@@ -399,3 +324,7 @@ if __name__ == "__main__":
     if args.track:
         wandb.finish()
     envs.close()
+
+
+if __name__ == "__main__":
+    main()

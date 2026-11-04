@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Training outputs & logs
+checkpoints/
+logs/
+videos/
+wandb/
