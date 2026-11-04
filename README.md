@@ -61,7 +61,7 @@ uv run pong-rl --use-fog --mask-enemy --seed 1
 Add `--arch lstm` to any of the commands above to train the CNN + LSTM agent instead.
 
 Useful flags:
-- `--total-timesteps 5000000` (default: `5_000_000`)
+- `--total-timesteps 20000000` (default: `20_000_000`)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
 
 ### Full Experiment Sweep (4 conditions × 3 seeds = 12 runs)

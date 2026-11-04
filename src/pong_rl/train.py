@@ -41,7 +41,7 @@ class Args:
     arch: str = "cnn"
     use_fog: bool = False
     mask_enemy: bool = False
-    total_timesteps: int = 5_000_000
+    total_timesteps: int = 20_000_000
     learning_rate: float = 2.5e-4
     num_envs: int = 8
     num_steps: int = 128
@@ -76,7 +76,7 @@ def parse_args() -> Args:
     )
     parser.add_argument("--use-fog", action="store_true", help="Enable FogWrapper on agent half")
     parser.add_argument("--mask-enemy", action="store_true", help="Enable EnemyMaskWrapper on enemy paddle")
-    parser.add_argument("--total-timesteps", type=int, default=5_000_000)
+    parser.add_argument("--total-timesteps", type=int, default=20_000_000)
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--track", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--wandb-project-name", type=str, default="pong-rl")
