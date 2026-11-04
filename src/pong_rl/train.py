@@ -110,6 +110,8 @@ def main():
             name=run_name,
             save_code=True,
         )
+        wandb.define_metric("global_step")
+        wandb.define_metric("*", step_metric="global_step")
 
     # Seeding
     random.seed(args.seed)
@@ -138,6 +140,8 @@ def main():
             )
             for i in range(args.num_envs)
         ],
+        # The GAE computation below assumes the returned obs after a done is already the reset obs
+        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     assert envs.single_observation_space.shape is not None
@@ -187,12 +191,14 @@ def main():
             next_obs = torch.tensor(next_obs_np, dtype=torch.float32, device=device)
             next_done = torch.tensor(next_done_np, dtype=torch.float32, device=device)
 
-            # Gymnasium >= 1.0 logs finished episodes in infos["episode"] with a boolean mask infos["_episode"]
-            if "episode" in infos:
-                for i, has_ep in enumerate(infos.get("_episode", [])):
+            # With SAME_STEP autoreset, finished episodes are logged in infos["final_info"]["episode"]
+            # with a boolean mask infos["final_info"]["_episode"]
+            final_info = infos.get("final_info", {})
+            if "episode" in final_info:
+                for i, has_ep in enumerate(final_info["_episode"]):
                     if has_ep:
-                        ep_return = float(infos["episode"]["r"][i])
-                        ep_length = int(infos["episode"]["l"][i])
+                        ep_return = float(final_info["episode"]["r"][i])
+                        ep_length = int(final_info["episode"]["l"][i])
                         print(f"[{condition}|s{args.seed}] step={global_step}, return={ep_return}")
                         if args.track:
                             wandb.log(

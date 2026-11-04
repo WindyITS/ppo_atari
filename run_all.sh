@@ -16,6 +16,7 @@ SEEDS=(1 2 3)
 mkdir -p logs checkpoints
 
 running=0
+failed=0
 for seed in "${SEEDS[@]}"; do
   for fog_flag in "" "--use-fog"; do
     for mask_flag in "" "--mask-enemy"; do
@@ -32,12 +33,20 @@ for seed in "${SEEDS[@]}"; do
 
       running=$((running + 1))
       if (( running >= MAX_PARALLEL )); then
-        wait -n
+        wait -n || failed=$((failed + 1))
         running=$((running - 1))
       fi
     done
   done
 done
 
-wait
+while (( running > 0 )); do
+  wait -n || failed=$((failed + 1))
+  running=$((running - 1))
+done
+
+if (( failed > 0 )); then
+  echo "${failed} of 12 runs failed. Check ./logs/ for details."
+  exit 1
+fi
 echo "All 12 runs completed! Checkpoints saved in ./checkpoints/"
