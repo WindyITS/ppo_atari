@@ -18,7 +18,7 @@ Course project investigating whether a pixel-based PPO agent in Atari Pong (`ALE
 │   ├── train.py            # CleanRL-based PPO training loop (feedforward or recurrent) with W&B tracking & checkpointing
 │   └── wrappers.py         # Custom `FogWrapper` (agent half) and `EnemyMaskWrapper` (enemy paddle)
 ├── pyproject.toml          # Project dependencies (managed with `uv`)
-└── run_all.sh              # Launches all 4 conditions x 3 seeds (12 runs) in parallel
+└── run_all.sh              # Launches all 4 conditions x 2 seeds (8 runs) per architecture
 ```
 
 ## Setup
@@ -64,17 +64,19 @@ Useful flags:
 - `--total-timesteps 20000000` (default: `20_000_000`)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
 
-### Full Experiment Sweep (4 conditions × 3 seeds = 12 runs)
+### Full Experiment Sweep (4 conditions × 2 seeds = 8 runs per architecture)
+
+The default seeds are 1 and 2. Running both architectures covers 8 cases and 16 training runs in total.
 
 ```bash
-# Runs 6 jobs in parallel by default (2 waves of 6):
+# Runs all 8 jobs in parallel by default:
 bash run_all.sh
 
-# Or run all 12 simultaneously:
-MAX_PARALLEL=12 bash run_all.sh
+# Limit to 4 simultaneous jobs:
+MAX_PARALLEL=4 bash run_all.sh
 
 # Same sweep with the CNN + LSTM agent:
 ARCH=lstm bash run_all.sh
 ```
 
-Trained checkpoints are saved to `checkpoints/{cnn|lstm}_fog_{0|1}_mask_{0|1}_seed_{1|2|3}.pt` and logs to `logs/`.
+Trained checkpoints are saved to `checkpoints/{cnn|lstm}_fog_{0|1}_mask_{0|1}_seed_{1|2}.pt` and logs to `logs/`.
