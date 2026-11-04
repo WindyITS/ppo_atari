@@ -1,0 +1,24 @@
+[project]
+name = "pong-rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Giulio Sighieri", email = "giulio.sighieri@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "ale-py>=0.12.1",
+    "gymnasium[atari,other]>=1.4.0",
+    "numpy>=2.5.4",
+    "opencv-python>=5.0.0.93",
+    "torch>=2.15.0",
+    "wandb>=0.31.0",
+]
+
+[project.scripts]
+pong-rl = "pong_rl:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
