@@ -1,5 +1,4 @@
 import gymnasium as gym
-import numpy as np
 
 from pong_rl.wrappers import EnemyMaskWrapper, FogWrapper
 
@@ -13,12 +12,22 @@ def make_env(
     mask_enemy: bool = False,
 ):
     def thunk():
+        # Match DeepMind 2013/2015 & CleanRL PongNoFrameskip-v4:
+        # frameskip=1 (handled by AtariPreprocessing) and repeat_action_probability=0.0 (no sticky actions)
         if capture_video and idx == 0:
-            env = gym.make(env_id, frameskip=1, render_mode="rgb_array")
+            env = gym.make(
+                env_id,
+                frameskip=1,
+                repeat_action_probability=0.0,
+                render_mode="rgb_array",
+            )
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id, frameskip=1)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
+            env = gym.make(
+                env_id,
+                frameskip=1,
+                repeat_action_probability=0.0,
+            )
         env = gym.wrappers.AtariPreprocessing(
             env,
             noop_max=30,
@@ -32,6 +41,7 @@ def make_env(
         if mask_enemy:
             env = EnemyMaskWrapper(env)
         env = gym.wrappers.FrameStackObservation(env, stack_size=4)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
 
     return thunk
