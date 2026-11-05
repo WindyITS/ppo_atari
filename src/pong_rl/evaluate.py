@@ -1,6 +1,7 @@
 """Evaluate frozen CNN/LSTM checkpoints under an explicit, shared protocol."""
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version
@@ -56,8 +57,24 @@ def evaluate_checkpoint(
     checkpoint = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
     config = _checkpoint_config(checkpoint)
     arch = config["arch"]
+    with _evaluation_torch_settings():
+        return _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, device)
+
+
+@contextmanager
+def _evaluation_torch_settings():
+    """Single-threaded, deterministic cuDNN while evaluating; the caller's settings are restored."""
+    threads, deterministic = torch.get_num_threads(), torch.backends.cudnn.deterministic
     torch.set_num_threads(1)
     torch.backends.cudnn.deterministic = True
+    try:
+        yield
+    finally:
+        torch.set_num_threads(threads)
+        torch.backends.cudnn.deterministic = deterministic
+
+
+def _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, device) -> dict:
     envs = gym.vector.SyncVectorEnv(
         [make_env(config["env_id"], 0, False, "evaluation", use_fog=config["use_fog"],
                   mask_enemy=config["mask_enemy"], frame_stack=FRAME_STACK[arch])],

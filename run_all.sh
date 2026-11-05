@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Train all 4 conditions (fog off/on x enemy mask off/on) across 2 seeds = 8 runs.
+# Train all 4 conditions (fog off/on x enemy mask off/on) across each seed in SEEDS (default 2 = 8 runs).
 # Usage:
-#   bash run_all.sh                 # default: CNN, runs all 8 jobs in parallel
+#   bash run_all.sh                 # default: CNN, runs up to 8 jobs in parallel
 #   ARCH=lstm bash run_all.sh       # CNN + LSTM (1 frame per step) instead of the frame-stacked CNN
 #   MAX_PARALLEL=4 bash run_all.sh  # limit to 4 simultaneous jobs
 
@@ -12,8 +12,10 @@ export MKL_NUM_THREADS=1
 
 ARCH="${ARCH:-cnn}"
 MAX_PARALLEL="${MAX_PARALLEL:-8}"
-TIMESTEPS="${TIMESTEPS:-20000000}"
+TIMESTEPS="${TIMESTEPS:-10000000}"
 SEEDS=(1 2)
+CONDITIONS=4  # fog off/on x enemy mask off/on
+TOTAL_RUNS=$(( ${#SEEDS[@]} * CONDITIONS ))
 
 mkdir -p logs checkpoints
 
@@ -49,7 +51,7 @@ while (( running > 0 )); do
 done
 
 if (( failed > 0 )); then
-  echo "${failed} of 8 runs failed. Check ./logs/ for details."
+  echo "${failed} of ${TOTAL_RUNS} runs failed. Check ./logs/ for details."
   exit 1
 fi
-echo "All 8 runs completed! Checkpoints saved in ./checkpoints/"
+echo "All ${TOTAL_RUNS} runs completed! Checkpoints saved in ./checkpoints/"

@@ -1,7 +1,7 @@
 [project]
 name = "pong-rl"
 version = "0.1.0"
-description = "Add your description here"
+description = "PPO agents on Atari Pong under occlusion: memory vs. visual shortcuts"
 readme = "README.md"
 authors = [
     { name = "Giulio Sighieri", email = "giulio.sighieri@gmail.com" }
@@ -23,3 +23,8 @@ pong-eval = "pong_rl.evaluate:main"
 [build-system]
 requires = ["uv_build>=0.12.9,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

@@ -31,6 +31,12 @@ Install dependencies with [`uv`](https://docs.astral.sh/uv/):
 uv sync
 ```
 
+Run the tests (pytest is in the `dev` dependency group, installed by `uv sync`):
+
+```bash
+uv run pytest
+```
+
 ## Architectures
 
 | `--arch` | Input per step | Memory | Reference |
@@ -83,7 +89,7 @@ uv run pong-rl --use-fog --mask-enemy --seed 1
 Add `--arch lstm` to any of the commands above to train the CNN + LSTM agent instead.
 
 Useful flags:
-- `--total-timesteps 20000000` (default: `20_000_000`)
+- `--total-timesteps 10000000` (default: `10_000_000`, matching the last checkpoint milestone)
 - `--rallies-per-update 5` (default: five rallies per environment, or its game-ending remainder)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
 - `--report-window-steps 500000` (report episodes ending in the latest 500,000 aggregate environment steps)
@@ -123,6 +129,7 @@ For example: `checkpoints/lstm_fog_1_mask_1_seed_1_step_2500000.pt`.
 Each file records `checkpoint_step` (requested milestone), `global_step` (actual experience),
 `updates`, and `optimizer_steps`; evaluation reports expose the milestone and actual training steps.
 The existing filename without `_step_...` is still saved at the end of training as the final model.
+With the default 10M budget, the 10M snapshot and the final model hold the same weights.
 Snapshots are written atomically and uploaded to W&B when tracking is enabled. `--no-save-model`
 disables both milestone and final saves. All these files work with `pong-eval`.
 
