@@ -44,7 +44,7 @@ class TrainingReportingTests(unittest.TestCase):
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as directory:
                 def factory(*args, **kwargs):
                     return lambda: gym.wrappers.RecordEpisodeStatistics(TwoStepGame(kwargs["frame_stack"]))
-                args = Args(arch=arch, total_timesteps=1024, num_envs=8, track=True,
+                args = Args(arch=arch, total_timesteps=1024, num_envs=8, num_steps=2, track=True,
                             save_model=False, report_window_steps=128)
                 cwd = Path.cwd()
                 try:
@@ -60,6 +60,10 @@ class TrainingReportingTests(unittest.TestCase):
                     self.assertEqual(len(records), 512)
                     self.assertEqual(sum(row["outcome"] == "timeout" for row in records), 256)
                     self.assertEqual(sum(row["outcome"] == "win" for row in records), 256)
+                    updates = [json.loads(line) for line in next(Path("logs", "scratch", arch, "clean", "seed_1").glob("updates_*.jsonl")).read_text().splitlines()]
+                    self.assertEqual(len(updates), 64)  # 1024 steps / (8 games x 2 steps)
+                    self.assertEqual(updates[-1]["global_step"], 1024)
+                    self.assertTrue(all("losses/approx_kl" in row for row in updates))
                     metrics = tracker.log.call_args_list[-1].args[0]
                     self.assertEqual(metrics["charts/window/start_step_exclusive"], 896)
                     self.assertEqual(metrics["charts/window/end_step_inclusive"], 1024)

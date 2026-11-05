@@ -1,4 +1,4 @@
-"""PPO updates for variable batches, preserving complete recurrent rally sequences."""
+"""PPO updates; recurrent agents replay whole sequences from their saved memory."""
 
 import math
 
@@ -9,36 +9,40 @@ from torch.utils.checkpoint import checkpoint
 from pong_rl.models import RecurrentAgent
 
 
-def replay_rally(agent, rally, device, checkpoint_steps=32):
-    """Compatibility wrapper for a single complete rally."""
-    return replay_rallies(agent, [rally], device, checkpoint_steps)
+def replay_sequences(agent, sequences, device, checkpoint_steps=32, checkpoint_threshold=0,
+                     observations=None, actions=None):
+    """Replay padded sequences together; return only real steps in sequence order.
 
-
-def replay_rallies(agent, rallies, device, checkpoint_steps=32, checkpoint_threshold=0):
-    """Replay padded rallies together; return only real steps in rally order.
+    observations and actions optionally give each sequence's images and actions already on the
+    accelerator (one upload per update instead of one per minibatch and epoch); by default the
+    sequences' own CPU tensors are used.
 
     Each lane starts with its own saved memory. Padding follows real steps and
     contributes no loss. Chunk boundaries preserve the full recurrent gradient.
     Small batches can retain activations; larger batches recompute checkpoint
     chunks to bound accelerator memory. Neither mode truncates gradients.
     """
-    lengths = [len(r) for r in rallies]
-    batch = len(rallies)
+    lengths = [len(s) for s in sequences]
+    batch = len(sequences)
     steps = max(lengths)
-    observations = torch.zeros((steps, batch, *rallies[0].observations.shape[1:]),
-                               dtype=rallies[0].observations.dtype)
-    actions = torch.zeros((steps, batch), dtype=torch.long)
-    for lane, rally in enumerate(rallies):
-        observations[:len(rally), lane] = rally.observations
-        actions[:len(rally), lane] = rally.actions
-    state = tuple(torch.cat([r.initial_state[i] for r in rallies], dim=1).to(device)
+    sources = [s.observations for s in sequences] if observations is None else observations
+    action_sources = [s.actions for s in sequences] if actions is None else actions
+    padded = torch.zeros((steps, batch, *sources[0].shape[1:]), dtype=sources[0].dtype,
+                         device=sources[0].device)
+    padded_actions = torch.zeros((steps, batch), dtype=torch.long, device=action_sources[0].device)
+    for lane, (length, source, action) in enumerate(zip(lengths, sources, action_sources)):
+        padded[:length, lane] = source
+        padded_actions[:length, lane] = action
+    observations, actions = padded, padded_actions.to(device)
+    state = tuple(torch.cat([s.initial_state[i] for s in sequences], dim=1).to(device)
                   for i in range(2))
     outputs = [[], [], []]
 
     def replay(obs, act, h, c):
+        # Sequences never cross a game reset, so replay needs no done flags.
         _, logp, entropy, value, (h, c) = agent.get_action_and_value(
             obs.flatten(0, 1).to(device=device, dtype=torch.float32), (h, c),
-            torch.zeros(act.numel(), device=device), act.flatten().to(device))
+            None, act.flatten().to(device))
         return logp, entropy, value.flatten(), h, c
 
     use_checkpoint = steps * batch > checkpoint_threshold
@@ -57,19 +61,25 @@ def replay_rallies(agent, rallies, device, checkpoint_steps=32, checkpoint_thres
 
 
 def update_policy(agent, optimizer, batch, args, device):
-    rallies = batch.rallies
-    offsets = np.cumsum([0] + [len(r) for r in rallies])
-    old_logp = torch.cat([r.logprobs for r in rallies]).to(device)
-    old_values = torch.cat([r.values for r in rallies]).to(device)
-    advantages = torch.cat([r.advantages for r in rallies])
-    returns = torch.cat([r.returns for r in rallies]).to(device)
+    sequences = batch.sequences
+    offsets = np.cumsum([0] + [len(s) for s in sequences])
+    old_logp = torch.cat([s.logprobs for s in sequences]).to(device)
+    old_values = torch.cat([s.values for s in sequences]).to(device)
+    advantages = torch.cat([s.advantages for s in sequences])
+    returns = torch.cat([s.returns for s in sequences]).to(device)
     if args.norm_adv:
-        # Normalize over the actual batch for both architectures, including tiny remainders.
+        # Normalize over the whole batch for every architecture.
         advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
     advantages = advantages.to(device)
     recurrent = isinstance(agent, RecurrentAgent)
-    observations = None if recurrent else torch.cat([r.observations for r in rallies])
-    actions = torch.cat([r.actions for r in rallies])
+    # Upload the batch's uint8 images once; every minibatch of every epoch then reads them on the
+    # accelerator instead of gathering and copying from CPU memory each time. At the defaults this is
+    # 4,096 steps (about 116 MB for 4 stacked frames); it grows with num_envs x num_steps.
+    observations = torch.cat([s.observations for s in sequences]).to(device)
+    actions = torch.cat([s.actions for s in sequences]).to(device)
+    # Per-sequence views of the uploaded tensors, for recurrent replay.
+    sequence_observations = [observations[offsets[i]:offsets[i+1]] for i in range(len(sequences))]
+    sequence_actions = [actions[offsets[i]:offsets[i+1]] for i in range(len(sequences))]
     totals = {key: torch.zeros((), device=device) for key in ("value_loss", "policy_loss", "entropy", "old_approx_kl", "approx_kl", "clipfrac")}
     samples = 0
     optimizer_steps = 0
@@ -77,15 +87,15 @@ def update_policy(agent, optimizer, batch, args, device):
     for _ in range(args.update_epochs):
         epoch_kl, epoch_samples = torch.zeros((), device=device), 0
         if recurrent:
-            # Balance real step counts while preserving complete rallies.
-            order = np.random.permutation(len(rallies)).tolist()
-            order.sort(key=lambda i: len(rallies[i]), reverse=True)
-            groups = [[] for _ in range(min(args.num_minibatches, len(rallies)))]
+            # Balance real step counts while keeping every sequence whole.
+            order = np.random.permutation(len(sequences)).tolist()
+            order.sort(key=lambda i: len(sequences[i]), reverse=True)
+            groups = [[] for _ in range(min(args.num_minibatches, len(sequences)))]
             sizes = [0] * len(groups)
             for i in order:
                 target = int(np.argmin(sizes))
                 groups[target].append(i)
-                sizes[target] += len(rallies[i])
+                sizes[target] += len(sequences[i])
             # Length balancing must not fix the optimizer's group order every epoch.
             order = np.random.permutation(len(groups))
             groups, sizes = [groups[i] for i in order], [sizes[i] for i in order]
@@ -101,29 +111,32 @@ def update_policy(agent, optimizer, batch, args, device):
             else:
                 # Accumulate CNN microbatches too, to bound accelerator image/activation storage.
                 units = [(group[start:start+256], None) for start in range(0, size, 256)]
-            for indices, rally_index in units:
+            for indices, sequence_index in units:
+                index = torch.as_tensor(indices, device=device)  # one small upload, reused below
                 if recurrent:
-                    newlogp, entropy, newvalue = replay_rallies(
-                        agent, [rallies[i] for i in rally_index], device,
-                        checkpoint_threshold=args.replay_checkpoint_threshold)
+                    newlogp, entropy, newvalue = replay_sequences(
+                        agent, [sequences[i] for i in sequence_index], device,
+                        checkpoint_threshold=args.replay_checkpoint_threshold,
+                        observations=[sequence_observations[i] for i in sequence_index],
+                        actions=[sequence_actions[i] for i in sequence_index])
                 else:
                     _, newlogp, entropy, newvalue = agent.get_action_and_value(
-                        observations[indices].to(device=device, dtype=torch.float32), actions[indices].to(device))
+                        observations.index_select(0, index).float(), actions.index_select(0, index))
                     newvalue = newvalue.flatten()
-                logratio = newlogp - old_logp[indices]
+                logratio = newlogp - old_logp.index_select(0, index)
                 ratio = logratio.exp()
-                adv = advantages[indices]
+                adv = advantages.index_select(0, index)
                 pg_loss = torch.maximum(-adv * ratio, -adv * ratio.clamp(1-args.clip_coef, 1+args.clip_coef)).mean()
-                targets = returns[indices]
+                targets = returns.index_select(0, index)
                 if args.clip_vloss:
-                    old = old_values[indices]
+                    old = old_values.index_select(0, index)
                     clipped = old + (newvalue - old).clamp(-args.clip_coef, args.clip_coef)
                     v_loss = 0.5 * torch.maximum((newvalue-targets).square(), (clipped-targets).square()).mean()
                 else:
                     v_loss = 0.5 * (newvalue-targets).square().mean()
                 entropy_loss = entropy.mean()
                 count = len(newlogp)
-                # One optimizer step per minibatch: weight by transitions, not rally count.
+                # One optimizer step per minibatch: weight by transitions, not sequence count.
                 loss = pg_loss - args.ent_coef * entropy_loss + args.vf_coef * v_loss
                 (loss * (count / size)).backward()
                 with torch.no_grad():

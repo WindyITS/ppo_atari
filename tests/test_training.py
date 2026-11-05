@@ -7,9 +7,9 @@ import numpy as np
 import torch
 
 from pong_rl.models import LSTMAgent, make_agent, zero_lstm_state
-from pong_rl.ppo import replay_rallies, replay_rally, update_policy
+from pong_rl.ppo import replay_sequences, update_policy
 from pong_rl.parallel_envs import ParallelEnvPool
-from pong_rl.rollouts import Rally, RallyCollector
+from pong_rl.rollouts import RolloutCollector, Sequence
 from pong_rl.train import Args
 
 
@@ -49,59 +49,146 @@ class MemoryCounter(LSTMAgent):
         return obs[:, 0, 0, 0].reshape(-1, 1)
 
 
-class RallyTrainingTests(unittest.TestCase):
+class TrainingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(1)
 
-    def test_five_rallies_then_game_remainder_with_paused_lanes_and_memory(self):
-        children = [gym.wrappers.RecordEpisodeStatistics(ScriptedGame(lengths))
-                    for lengths in ([1, 2, 1, 2, 1, 2, 1], [3, 3, 3])]
+    def test_every_game_plays_num_steps_and_sequences_split_only_at_game_ends(self):
+        children = [gym.wrappers.RecordEpisodeStatistics(ScriptedGame(lengths, timeout_at))
+                    for lengths, timeout_at in (([3, 3], None), ([4, 6], 5))]
         envs = gym.vector.SyncVectorEnv([lambda child=child: child for child in children])
         try:
-            collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1)
+            collector = RolloutCollector(envs, MemoryCounter(), torch.device("cpu"), 1, num_steps=8)
             episodes = []
-            first = collector.collect(1.0, 1.0, episodes.append)
-            self.assertEqual([len(r) for r in first.rallies], [1, 2, 1, 2, 1, 3, 3, 3])
-            self.assertEqual(first.steps, 16)
-            self.assertEqual(first.completed_rallies, 8)
-            self.assertEqual(first.ended_games, 1)
-            self.assertEqual(children[0].unwrapped.steps, 7)  # never stepped beyond quota
-            self.assertEqual(children[0].unwrapped.resets, 1)
-            self.assertEqual(children[1].unwrapped.resets, 2)
-            self.assertEqual(first.rallies[1].initial_state[0][0, 0, 0], 1)  # point kept memory
-            self.assertEqual(first.rallies[4].returns[-1], 9)  # point bootstraps V(next_obs)=8
-            self.assertEqual(first.rallies[-1].returns[-1], 1)  # game termination does not
-            self.assertEqual(first.rallies[0].returns[0], 13)  # GAE crosses all five points
-            second = collector.collect(1.0, 1.0, episodes.append)
-            self.assertEqual([len(r) for r in second.rallies[:2]], [2, 1])
-            self.assertEqual(second.completed_rallies, 5)  # two remaining + other lane's three
-            self.assertEqual(second.ended_games, 2)
-            self.assertEqual(second.rallies[0].initial_state[0][0, 0, 0], 7)
-            self.assertEqual(second.rallies[2].initial_state[0].count_nonzero(), 0)
-            self.assertEqual(episodes[1].episode_length, 10)
+            batch = collector.collect(1.0, 1.0, episodes.append)
+            self.assertEqual([len(s) for s in batch.sequences], [5, 6, 2, 3])  # timeout, end, two tails
+            self.assertEqual(batch.steps, 16)
+            self.assertEqual(batch.points, 3)
+            self.assertEqual(batch.ended_games, 2)
+            self.assertEqual(batch.global_step, 16)
+            self.assertEqual([e.truncated for e in episodes], [True, False])
+            self.assertEqual(batch.sequences[0].returns[-1], 6)  # timeout bootstraps V(final obs)=6
+            self.assertEqual(batch.sequences[0].returns[0], 7)   # and GAE crosses its point
+            self.assertEqual(batch.sequences[1].returns[0], 2)   # termination: no bootstrap
+            self.assertEqual(batch.sequences[2].returns[-1], 3)  # rollout end bootstraps V(obs)=3
+            self.assertEqual(batch.sequences[2].initial_state[0].count_nonzero(), 0)  # memory reset
+            self.assertEqual(batch.sequences[3].initial_state[0].count_nonzero(), 0)
+            self.assertEqual(collector.state[0][0, 0, 0], 2)  # memory continues into next batch
+            self.assertEqual(children[0].unwrapped.resets, 2)
+            # Each step stores the observation it acted on (ScriptedGame shows step t as value t).
+            game = batch.sequences[1]
+            self.assertEqual(game.observations[:, 0, 0, 0].tolist(), [1, 2, 3, 4, 5, 6])
+            torch.testing.assert_close(game.values, torch.arange(1.0, 7.0))
+            tail = batch.sequences[2]  # starts with the reset observation
+            self.assertEqual(tail.observations[:, 0, 0, 0].tolist(), [1, 2])
+        finally:
+            envs.close()
+
+    def test_points_keep_memory_and_memory_continues_across_batches(self):
+        envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([2] * 10))])
+        try:
+            collector = RolloutCollector(envs, MemoryCounter(), torch.device("cpu"), 1, num_steps=3)
+            first = collector.collect(1.0, 1.0, lambda _: None)
+            second = collector.collect(1.0, 1.0, lambda _: None)
+            self.assertEqual([len(s) for s in first.sequences + second.sequences], [3, 3])
+            self.assertEqual((first.points, second.points), (1, 2))
+            self.assertEqual(second.sequences[0].initial_state[0][0, 0, 0], 3)  # not reset at points
+            self.assertEqual(first.sequences[0].returns[-1], 4)  # rollout end bootstraps V(obs)=4
+            self.assertEqual(envs.envs[0].unwrapped.resets, 1)
+        finally:
+            envs.close()
+
+    def test_timeout_bootstraps_from_final_observation_with_pre_reset_memory(self):
+        envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(
+            ScriptedGame([2, 5], timeout_at=4))])
+        try:
+            model = MemoryCounter()
+            collector = RolloutCollector(envs, model, torch.device("cpu"), 1, num_steps=4)
+            episodes = []
+            batch = collector.collect(1.0, 1.0, episodes.append)
+            self.assertEqual([len(s) for s in batch.sequences], [4])
+            self.assertEqual(batch.points, 1)
+            self.assertEqual(batch.sequences[0].returns[-1], 5)  # final obs, not reset obs (=1)
+            self.assertEqual(model.value_memories[-1][0, 0, 0], 4)  # pre-reset h/c
+            self.assertEqual(episodes[0].outcome, "timeout")
             self.assertEqual(collector.state[0].count_nonzero(), 0)
         finally:
             envs.close()
 
-    def test_parallel_collection_matches_serial_pauses_timeouts_and_memory(self):
+    def test_replaying_each_sequence_reproduces_collection_for_recurrent_agents(self):
+        for arch in ("lstm", "attn_lstm"):
+            with self.subTest(arch=arch):
+                torch.manual_seed(3)
+                children = [gym.wrappers.RecordEpisodeStatistics(ScriptedGame(lengths, timeout_at))
+                            for lengths, timeout_at in (([2, 3], None), ([4, 9], 6), ([20], None))]
+                envs = gym.vector.SyncVectorEnv([lambda child=child: child for child in children])
+                try:
+                    agent = make_agent(arch, envs)
+                    collector = RolloutCollector(envs, agent, torch.device("cpu"), 1, num_steps=7)
+                    for _ in range(3):  # resets inside rollouts and memory carried across batches
+                        batch = collector.collect(0.99, 0.95, lambda _: None)
+                        with torch.no_grad():
+                            for sequence in batch.sequences:
+                                logp, _, value = replay_sequences(agent, [sequence], torch.device("cpu"))
+                                torch.testing.assert_close(logp, sequence.logprobs, atol=1e-5, rtol=1e-5)
+                                torch.testing.assert_close(value, sequence.values, atol=1e-5, rtol=1e-5)
+                finally:
+                    envs.close()
+
+    def test_no_done_flags_match_all_zero_flags_including_gradients(self):
+        for arch in ("lstm", "attn_lstm"):
+            with self.subTest(arch=arch):
+                torch.manual_seed(5)
+                spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0, 255, (1,84,84), np.uint8),
+                                         single_action_space=gym.spaces.Discrete(6))
+                agent = make_agent(arch, spaces)
+                reference = copy.deepcopy(agent)
+                obs = torch.randint(0, 256, (6 * 3, 1, 84, 84)).float()
+                state = tuple(torch.randn(1, 3, 128) for _ in range(2))
+                hidden, (h, c) = agent.get_states(obs, state, None)
+                ref_hidden, (ref_h, ref_c) = reference.get_states(obs, state, torch.zeros(18))
+                for actual, expected in ((hidden, ref_hidden), (h, ref_h), (c, ref_c)):
+                    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+                (hidden.sum() + h.sum()).backward()
+                (ref_hidden.sum() + ref_h.sum()).backward()
+                for (name, parameter), target in zip(agent.named_parameters(), reference.parameters()):
+                    with self.subTest(parameter=name):
+                        torch.testing.assert_close(parameter.grad, target.grad, atol=1e-5, rtol=1e-4)
+
+    def test_target_kl_stops_the_remaining_epochs(self):
+        spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0,255,(4,84,84), np.uint8),
+                                 single_action_space=gym.spaces.Discrete(6))
+        torch.manual_seed(2)
+        agent = make_agent("cnn", spaces)
+        obs = torch.randint(0, 256, (4, 4, 84, 84), dtype=torch.uint8)
+        with torch.no_grad():
+            actions, logp, _, values = agent.get_action_and_value(obs.float())
+        sequence = Sequence(obs, actions, logp, values.flatten(), torch.tensor([1.0, -1.0, 2.0, -2.0]),
+                            torch.zeros(4), zero_lstm_state(1, torch.device("cpu")))
+        batch = SimpleNamespace(sequences=[sequence], steps=4)
+        metrics = update_policy(agent, torch.optim.Adam(agent.parameters(), lr=1e-2), batch,
+                                Args(update_epochs=4, num_minibatches=2, target_kl=1e-12), torch.device("cpu"))
+        self.assertEqual(metrics["charts/optimizer_steps"], 2)  # one epoch of two minibatches
+
+    def test_parallel_collection_matches_serial_resets_timeouts_and_memory(self):
         factories = [lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([1,2,1,2,1,2,1])),
                      lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([2,5], timeout_at=4))]
-        serial = gym.vector.SyncVectorEnv(factories)
+        serial = gym.vector.SyncVectorEnv(factories, autoreset_mode=gym.vector.AutoresetMode.DISABLED)
         parallel = ParallelEnvPool(factories)
         try:
-            collectors = [RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1)
+            collectors = [RolloutCollector(envs, MemoryCounter(), torch.device("cpu"), 1, num_steps=5)
                           for envs in (serial, parallel)]
-            for _ in range(2):
+            for _ in range(3):
                 episodes = [[], []]
                 expected, actual = [collector.collect(0.99, 0.95, events.append)
                                     for collector, events in zip(collectors, episodes)]
                 self.assertEqual(episodes[0], episodes[1])
                 self.assertEqual(expected.global_step, actual.global_step)
-                self.assertEqual(expected.completed_rallies, actual.completed_rallies)
+                self.assertEqual(expected.points, actual.points)
                 self.assertEqual(expected.ended_games, actual.ended_games)
-                self.assertEqual(len(expected.rallies), len(actual.rallies))
-                for left, right in zip(expected.rallies, actual.rallies):
+                self.assertEqual(len(expected.sequences), len(actual.sequences))
+                for left, right in zip(expected.sequences, actual.sequences):
                     for name in ("observations", "actions", "logprobs", "values", "advantages", "returns"):
                         torch.testing.assert_close(getattr(left, name), getattr(right, name))
                     for x, y in zip(left.initial_state, right.initial_state):
@@ -115,101 +202,7 @@ class RallyTrainingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ZeroDivisionError"):
             ParallelEnvPool([lambda: 1 / 0])
 
-    def test_rally_cap_bootstraps_and_resumes_without_reset_in_both_collectors(self):
-        for parallel in (False, True):
-            with self.subTest(parallel=parallel):
-                factories = [lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([10]))]
-                envs = ParallelEnvPool(factories) if parallel else gym.vector.SyncVectorEnv(factories)
-                try:
-                    collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1,
-                                               max_rally_steps=4)
-                    episodes = []
-                    for index in range(2):
-                        batch = collector.collect(1.0, 1.0, episodes.append)
-                        self.assertEqual([len(r) for r in batch.rallies], [4])
-                        self.assertEqual((batch.completed_rallies, batch.ended_games, batch.capped_rallies), (0,0,1))
-                        self.assertEqual(batch.rallies[0].initial_state[0][0,0,0], index * 4)
-                        torch.testing.assert_close(batch.rallies[0].returns, torch.full((4,), float(5 + index * 4)))
-                        self.assertEqual(episodes, [])
-                    last = collector.collect(1.0, 1.0, episodes.append)
-                    self.assertEqual([len(r) for r in last.rallies], [2])
-                    self.assertEqual((last.completed_rallies, last.ended_games, last.capped_rallies), (1,1,0))
-                    self.assertEqual(last.rallies[0].initial_state[0][0,0,0], 8)
-                    self.assertEqual(last.rallies[0].returns[-1], 1)
-                    self.assertEqual(episodes[0].episode_length, 10)
-                    self.assertEqual(collector.state[0].count_nonzero(), 0)
-                finally:
-                    envs.close()
-
-    def test_point_and_game_timeout_take_precedence_over_cap(self):
-        for timeout in (None, 4):
-            envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(
-                ScriptedGame([4] if timeout is None else [10], timeout_at=timeout))])
-            try:
-                collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1,
-                                           max_rally_steps=4)
-                episodes = []
-                batch = collector.collect(1.0, 1.0, episodes.append)
-                self.assertEqual(batch.capped_rallies, 0)
-                self.assertEqual(batch.ended_games, 1)
-                self.assertEqual(batch.rallies[0].returns[-1], 1 if timeout is None else 5)
-                self.assertEqual(episodes[0].outcome, "win" if timeout is None else "timeout")
-            finally:
-                envs.close()
-
-    def test_cap_flushes_earlier_points_and_pauses_other_lanes_independently(self):
-        factories = [lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([1,1,10])),
-                     lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([1] * 7))]
-        envs = gym.vector.SyncVectorEnv(factories)
-        try:
-            collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1,
-                                       max_rally_steps=4)
-            batch = collector.collect(1.0, 1.0, lambda _: None)
-            self.assertEqual([len(r) for r in batch.rallies], [1,1,4,1,1,1,1,1])
-            self.assertEqual(batch.steps, 11)
-            self.assertEqual(batch.completed_rallies, 7)
-            self.assertEqual(batch.capped_rallies, 1)
-            self.assertEqual(envs.envs[0].unwrapped.steps, 6)
-            self.assertEqual(envs.envs[1].unwrapped.steps, 5)
-            self.assertEqual(batch.rallies[0].returns[0], 9)  # two points + cap bootstrap V=7
-        finally:
-            envs.close()
-
-    def test_timeout_flushes_partial_rally_and_bootstraps_before_reset(self):
-        envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(
-            ScriptedGame([2, 5], timeout_at=4))])
-        try:
-            model = MemoryCounter()
-            collector = RallyCollector(envs, model, torch.device("cpu"), 1)
-            episodes = []
-            batch = collector.collect(1.0, 1.0, episodes.append)
-            self.assertEqual([len(r) for r in batch.rallies], [2, 2])
-            self.assertEqual(batch.completed_rallies, 1)
-            self.assertEqual(batch.rallies[-1].returns[-1], 5)  # final obs, not reset obs (=1)
-            self.assertEqual(model.value_memories[-1][0,0,0], 4)  # pre-reset h/c
-            self.assertEqual(episodes[0].outcome, "timeout")
-            self.assertEqual(collector.state[0].count_nonzero(), 0)
-        finally:
-            envs.close()
-
-    def test_all_game_ending_remainders_and_exact_five_boundary(self):
-        for points in range(6, 11):
-            with self.subTest(points=points):
-                envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(
-                    ScriptedGame([1] * points))])
-                try:
-                    collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1)
-                    first = collector.collect(0.99, 0.95, lambda _: None)
-                    second = collector.collect(0.99, 0.95, lambda _: None)
-                    self.assertEqual(first.completed_rallies, 5)
-                    self.assertEqual(second.completed_rallies, points - 5)
-                    self.assertEqual(len(second.rallies), points - 5)
-                    self.assertEqual(second.ended_games, 1)
-                    self.assertTrue(all(len(r) == 1 for r in second.rallies))
-                finally:
-                    envs.close()
-
-    def test_checkpointed_replay_matches_full_rally_outputs_and_gradients(self):
+    def test_checkpointed_replay_matches_full_sequence_outputs_and_gradients(self):
         for arch in ("lstm", "attn_lstm"):
             with self.subTest(arch=arch):
                 self.check_checkpointed_replay(arch)
@@ -224,8 +217,8 @@ class RallyTrainingTests(unittest.TestCase):
         actions = torch.arange(35) % 6
         initial = zero_lstm_state(1, torch.device("cpu"))
         zeros = torch.zeros(35)
-        rally = Rally(obs, actions, zeros, zeros, zeros, zeros, initial)
-        logp, entropy, value = replay_rally(agent, rally, torch.device("cpu"))
+        sequence = Sequence(obs, actions, zeros, zeros, zeros, zeros, initial)
+        logp, entropy, value = replay_sequences(agent, [sequence], torch.device("cpu"))
         _, ref_logp, ref_entropy, ref_value, _ = reference.get_action_and_value(
             obs.float(), initial, zeros, actions)
         torch.testing.assert_close(logp, ref_logp)
@@ -247,20 +240,20 @@ class RallyTrainingTests(unittest.TestCase):
                     single_action_space=gym.spaces.Discrete(6))
                 agent = make_agent(arch, spaces)
                 reference = copy.deepcopy(agent)
-                rallies = []
+                sequences = []
                 expected = [[], [], []]
                 for length in (35, 7, 1):
                     obs = torch.randint(0, 256, (length, 1, 84, 84), dtype=torch.uint8)
                     actions = torch.arange(length) % 6
                     zeros = torch.zeros(length)
                     initial = tuple(torch.randn_like(s) for s in zero_lstm_state(1, torch.device("cpu")))
-                    rallies.append(Rally(obs, actions, zeros, zeros, zeros, zeros, initial))
+                    sequences.append(Sequence(obs, actions, zeros, zeros, zeros, zeros, initial))
                     _, logp, entropy, value, _ = reference.get_action_and_value(
                         obs.float(), initial, zeros, actions)
                     for parts, output in zip(expected, (logp, entropy, value.flatten())):
                         parts.append(output)
                 # Exercise retained activations as well as checkpoint recomputation.
-                actual = replay_rallies(agent, rallies, torch.device("cpu"),
+                actual = replay_sequences(agent, sequences, torch.device("cpu"),
                                         checkpoint_threshold=2048)
                 expected = tuple(torch.cat(parts) for parts in expected)
                 for output, target in zip(actual, expected):
@@ -273,14 +266,14 @@ class RallyTrainingTests(unittest.TestCase):
                     with self.subTest(parameter=name):
                         torch.testing.assert_close(parameter.grad, target.grad, atol=4e-6, rtol=5e-4)
 
-    def test_both_architectures_update_from_tiny_variable_batches(self):
+    def test_all_architectures_update_from_tiny_variable_batches(self):
         for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch):
                 channels = 4 if arch == "cnn" else 1
                 spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0,255,(channels,84,84), np.uint8),
                                          single_action_space=gym.spaces.Discrete(6))
                 agent = make_agent(arch, spaces)
-                rallies = []
+                sequences = []
                 for length in (1, 3):
                     obs = torch.randint(0,256,(length,channels,84,84),dtype=torch.uint8)
                     state = zero_lstm_state(1, torch.device("cpu"))
@@ -289,9 +282,9 @@ class RallyTrainingTests(unittest.TestCase):
                             actions, logp, _, values = agent.get_action_and_value(obs.float())
                         else:
                             actions, logp, _, values, _ = agent.get_action_and_value(obs.float(), state, torch.zeros(length))
-                    rallies.append(Rally(obs, actions, logp, values.flatten(), torch.arange(length).float()+1,
-                                         torch.arange(length).float()+2, state))
-                batch = SimpleNamespace(rallies=rallies, steps=4)
+                    sequences.append(Sequence(obs, actions, logp, values.flatten(), torch.arange(length).float()+1,
+                                              torch.arange(length).float()+2, state))
+                batch = SimpleNamespace(sequences=sequences, steps=4)
                 before = agent.actor.weight.detach().clone()
                 metrics = update_policy(agent, torch.optim.Adam(agent.parameters(), lr=1e-3), batch,
                                         Args(update_epochs=1), torch.device("cpu"))
@@ -299,7 +292,7 @@ class RallyTrainingTests(unittest.TestCase):
                 self.assertTrue(all(np.isfinite(v) for v in metrics.values()))
                 self.assertEqual(metrics["charts/optimizer_steps"], 4 if arch == "cnn" else 2)
 
-    def test_unequal_rallies_are_weighted_by_steps_for_both_architectures(self):
+    def test_unequal_sequences_are_weighted_by_steps_for_all_architectures(self):
         for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch):
                 channels = 4 if arch == "cnn" else 1
@@ -307,7 +300,7 @@ class RallyTrainingTests(unittest.TestCase):
                                          single_action_space=gym.spaces.Discrete(6))
                 agent = make_agent(arch, spaces)
                 reference = copy.deepcopy(agent)
-                rallies, ref_losses = [], []
+                sequences, ref_losses = [], []
                 for length in (1, 3):
                     obs = torch.randint(0,256,(length,channels,84,84),dtype=torch.uint8)
                     actions = torch.arange(length) % 6
@@ -319,8 +312,8 @@ class RallyTrainingTests(unittest.TestCase):
                         _, logp, _, value, _ = reference.get_action_and_value(obs.float(), state, zeros, actions)
                     advantages = torch.arange(length).float() + 1
                     old_logp = logp.detach().clone()
-                    rallies.append(Rally(obs, actions, old_logp, value.detach().flatten().clone(),
-                                         advantages, zeros, state))
+                    sequences.append(Sequence(obs, actions, old_logp, value.detach().flatten().clone(),
+                                              advantages, zeros, state))
                     ref_losses.append(-advantages * (logp - old_logp).exp())
                 ref_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01)
                 torch.cat(ref_losses).mean().backward()
@@ -328,7 +321,7 @@ class RallyTrainingTests(unittest.TestCase):
                 args = Args(update_epochs=1, num_minibatches=1, norm_adv=False,
                             ent_coef=0, vf_coef=0, max_grad_norm=1e6)
                 update_policy(agent, torch.optim.SGD(agent.parameters(), lr=0.01),
-                              SimpleNamespace(rallies=rallies, steps=4), args, torch.device("cpu"))
+                              SimpleNamespace(sequences=sequences, steps=4), args, torch.device("cpu"))
                 for actual, expected in zip(agent.parameters(), reference.parameters()):
                     torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-5)
 

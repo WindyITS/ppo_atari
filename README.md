@@ -16,8 +16,8 @@ Course project investigating whether a pixel-based PPO agent in Atari Pong (`ALE
 │   ├── envs.py             # Environment factory (AtariPreprocessing + custom wrappers + FrameStack)
 │   ├── models.py           # CNN, CNN + LSTM and attention + LSTM Actor-Critics, exposing hidden states and attention
 │   ├── train.py            # CleanRL-based PPO training loop (feedforward or recurrent) with W&B tracking & checkpointing
-│   ├── rollouts.py         # Five-rally batches, game-end remainders, episode reporting and GAE
-│   ├── ppo.py              # Variable-size PPO batches and full-rally recurrent replay
+│   ├── rollouts.py         # Fixed-length rollouts (256 steps per game), episode reporting and GAE
+│   ├── ppo.py              # PPO update; recurrent agents replay whole sequences from saved memory
 │   └── wrappers.py         # Custom `FogWrapper` (agent half) and `EnemyMaskWrapper` (enemy paddle)
 ├── pyproject.toml          # Project dependencies (managed with `uv`)
 └── run_all.sh              # Two-stage sweep: from scratch, then fine-tuning from the clean runs
@@ -72,36 +72,29 @@ the 7x7 map summarises an overlapping 36x36-pixel patch, with centres 8 pixels a
 smaller than the other two because it drops the 3136-to-512 dense layer; keep this in mind when comparing.
 
 All three use the same Nature CNN convolutions, PPO hyperparameters and collection rule.
-Each environment collects **five rallies**, its game-ending remainder, or a partial rally
-that reaches **512 environment steps** (`--max-rally-steps`), whichever stops the lane first.
-A point is detected from Pong's nonzero reward. With eight environments, a normal batch
-contains 40 rallies; finished lanes pause while the others reach their boundaries. Every
-transition in an update comes from the same frozen policy. A capped rally resumes under
-the next updated policy; no pending transitions are carried into that next batch.
+Each batch, **16 games** each play **256 steps** (`--num-envs`, `--num-steps`), 4,096 steps in total, all with
+the same frozen policy; then the PPO update runs. A game that ends inside a rollout is reset immediately
+(memory too) and keeps playing. Memory otherwise continues across points and across updates.
 
-The CNN shuffles observations into minibatches. Both recurrent agents (`lstm`, `attn_lstm`)
-replay each collected sequence in order from its saved memory. Gradients cover the full
-sequence, up to the 512-step cap, and stop at point, cap or game boundaries. Memory continues
-across points, caps and updates and resets only when a game terminates or times out. A cap
-bootstraps from the current observation and memory; it does not end/reset the game, add a
-reward or report an episode outcome. Logs and W&B record `capped_rallies` separately from
-actual points and game endings.
+The batch is cut into sequences at game ends only, so a sequence is at most 256 steps long and usually
+spans several points. The CNN shuffles single steps into minibatches. Both recurrent agents (`lstm`,
+`attn_lstm`) replay each sequence in order from its saved starting memory, with gradients over the whole
+sequence. Recurrent minibatches group whole sequences, balanced by step count, and pad them with padding
+masked out of the loss.
 
 Replay retains activations for batches of up to 2048 padded steps. Larger batches use
 activation checkpointing to recompute 32-step chunks and reduce accelerator memory use;
 those compute chunks do not detach memory or truncate gradients within a sequence.
 
-All architectures use four PPO epochs and up to four nonempty minibatches per epoch. Recurrent minibatches
-batch collected sequences together with padding masked out of the loss; CNN minibatches shuffle steps. Losses are weighted by actual step
-counts, and advantages are normalized over the actual collected batch. GAE continues across scoring points.
-True game termination has zero bootstrap value; a timeout uses the final observation and pre-reset memory.
-A timeout can end a partial rally, whose available transitions are included in the game-ending remainder.
+All architectures use four PPO epochs with four minibatches per epoch (16 optimizer steps per batch).
+Losses are weighted by actual step counts, and advantages are normalized over the batch. GAE continues
+across scoring points. A true game end has zero bootstrap value; a timeout uses the final observation and
+pre-reset memory; the end of a rollout bootstraps from the current observation and memory.
 
-The timestep target is a **soft aggregate environment-step budget**: the last batch is completed at its
-point, cap or game boundaries, so the actual count can exceed the target by the final batch. Learning-rate annealing
-uses actual collected steps. W&B and checkpoints record actual steps and update counts; W&B also records
-batch lengths, completed rallies, maximum sequence length and budget overshoot. Compare actual experience
-counts when comparing runs. These changes apply only to newly started training processes.
+The timestep target is a **soft aggregate environment-step budget**: the last batch is always completed,
+so the actual count can exceed the target by less than one batch. Learning-rate annealing uses actual
+collected steps. W&B and checkpoints record actual steps and update counts; W&B also records batch
+steps, points, sequences, game endings and budget overshoot.
 
 ## Running Training
 
@@ -126,12 +119,13 @@ Add `--arch lstm` (CNN + LSTM) or `--arch attn_lstm` (attention + LSTM) to any o
 Useful flags:
 - `--total-timesteps 15000000` (default: `15_000_000`, matching the last checkpoint milestone)
 - `--init-from PATH` (fine-tune from a checkpoint; see [Fine-tuning](#fine-tuning))
-- `--rallies-per-update 5` (default: five rallies per environment, stopping early on a game end or rally cap)
-- `--max-rally-steps 512` (maximum steps in one collected rally segment; game and memory continue afterward)
+- `--num-envs 16`, `--num-steps 256` (games played side by side, and steps each game plays per batch)
+- `--update-epochs 4`, `--num-minibatches 4` (PPO epochs, and minibatches per epoch)
+- `--target-kl 0.015` (optional: skip a batch's remaining epochs once an epoch's mean approximate KL exceeds it)
 - `--learning-rate 0.001` (initial learning rate; the existing linear annealing schedule remains enabled)
 - `--ent-coef 0.02` (entropy bonus coefficient)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
-- `--parallel-envs` (one CPU process per game; preserves individual pauses and resets; uses more host memory)
+- `--parallel-envs` (one CPU process per game; faster collection for a single job; uses more host memory)
 - `--replay-checkpoint-threshold 2048` (retain activations for small replay batches; `0` always recomputes to save memory)
 - `--report-window-steps 500000` (report episodes ending in the latest 500,000 aggregate environment steps)
 
@@ -139,7 +133,8 @@ Useful flags:
 
 Use `--parallel-envs` for a single GPU training job to collect games in separate CPU
 processes. Leave it off when running many simultaneous jobs unless CPU and RAM allow
-one worker per environment per job. Small recurrent replay batches retain activations;
+one worker per environment per job. A single job alternates between collecting (GPU mostly
+idle) and updating; running several jobs at once is what keeps the GPU busy. Small recurrent replay batches retain activations;
 `--replay-checkpoint-threshold 0` restores always-on activation recomputation when memory
 is limited. Both paths preserve gradients within each collected sequence and the same PPO optimizer groups.
 Training logs and W&B report collection and update times separately.
@@ -147,7 +142,7 @@ Training logs and W&B report collection and update times separately.
 Run a short benchmark without W&B, checkpoints, or changing existing runs:
 
 ```bash
-uv run python scripts/benchmark_training.py --parallel-envs
+uv run python scripts/benchmark_training.py --parallel-envs --arch attn_lstm --gpu-util
 uv run python scripts/benchmark_training.py --replay-checkpoint-threshold 0
 ```
 
@@ -163,6 +158,11 @@ episode, including any part before that window. The window reports its bounds, w
 episode count, mean return, mean episode length, completed games, wins, losses, draws, and timeouts.
 Ongoing episodes are not included, so compare episode counts and lengths alongside the averages.
 An empty window has undefined averages (`null`), rather than a misleading zero score.
+
+Next to each run's `episodes_<time>.jsonl`, `updates_<time>.jsonl` has one row per PPO update: step,
+batch shape, points and game endings, learning rate, collection and update seconds, and the PPO
+diagnostics (`losses/approx_kl`, `losses/clipfrac`, `losses/explained_variance`, ...; non-finite values
+are written as `null`).
 
 `completed_win_rate = wins / completed_games`, including draws in the denominator and excluding
 timeouts. When no games completed, that rate is undefined. `positive_return_fraction` counts every
@@ -182,7 +182,7 @@ those outcomes solely from an episode's length.
 Snapshots are taken at **0, 1M, 2M, 3M, 4M, 5M, 7.5M, 10M, 11M, 12M, 13M, 14M and 15M aggregate
 environment steps**; milestones beyond `--total-timesteps` are not requested. A from-scratch run saves its untrained
 weights at 0. Each snapshot is saved after the first PPO update that reaches or passes
-its milestone, preserving the rally-quota and step-cap collection rules, so its actual step count can be above the
+its milestone (batches are never cut short), so its actual step count can be above the
 filename's milestone. If one batch crosses multiple milestones, those files hold the same weights.
 
 Each run has its own folder, `checkpoints/<scratch|finetune>/<arch>/<condition>/seed_<n>/`, where the
@@ -266,6 +266,8 @@ Defaults: `ARCHS="cnn lstm attn_lstm"`, `SEEDS="1 2 3"`, 8 parallel jobs, i.e. 3
 Fine-tuning starts after every scratch run has finished, and only from parents whose run completed.
 Runs whose `final.pt` exists are skipped, so rerunning the script resumes an interrupted sweep; an
 unfinished run's checkpoint and log folders are first moved aside to `<folder>.aborted_<time>`.
+Runs finished with older code (rally-based batches) are skipped too, and fine-tunes would start from
+their checkpoints (`pong-rl` prints a warning); move old `checkpoints/` and `logs/` aside before a fresh sweep.
 
 ```bash
 bash run_all.sh                        # both stages

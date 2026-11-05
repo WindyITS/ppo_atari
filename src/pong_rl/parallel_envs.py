@@ -1,4 +1,4 @@
-"""Subprocess environments supporting individual lane pauses and resets."""
+"""Subprocess environments, one per game, stepped together and reset individually."""
 
 import multiprocessing as mp
 import traceback
@@ -52,10 +52,10 @@ class _RemoteEnv:
 
 
 class ParallelEnvPool:
-    """A worker per environment; only explicitly active lanes receive steps.
+    """A worker process per game. All games step in parallel; each is reset individually.
 
     Spawn avoids inheriting the parent's CUDA context. Unlike ordinary vector
-    stepping, completed lanes remain untouched until the collector resets them.
+    stepping, there is no autoreset: an ended game waits until the collector resets it.
     """
 
     def __init__(self, factories):
@@ -84,10 +84,11 @@ class ParallelEnvPool:
         results = [env.receive() for env in self.envs]
         return np.stack([obs for obs, _ in results]), {}
 
-    def step_active(self, active, actions):
-        for i, action in zip(active, actions):
-            self.envs[i].connection.send(("step", action))
-        return [self.envs[i].receive() for i in active]
+    def step_each(self, actions):
+        """Send one action to every game, then collect every game's step result."""
+        for env, action in zip(self.envs, actions):
+            env.connection.send(("step", action))
+        return [env.receive() for env in self.envs]
 
     def close(self):
         if self.closed:

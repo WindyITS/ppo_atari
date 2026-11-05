@@ -86,7 +86,7 @@ class CheckpointTests(unittest.TestCase):
     def test_zero_and_crossed_milestones_for_both_models(self):
         for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch), inside_temporary_directory():
-                tracker = self.run_training(Args(arch=arch, total_timesteps=6, num_envs=1), (0, 3, 5, 7))
+                tracker = self.run_training(Args(num_steps=2, arch=arch, total_timesteps=6, num_envs=1), (0, 3, 5, 7))
                 folder = Path("checkpoints", "scratch", arch, "clean", "seed_1")
                 self.assertEqual(sorted(p.name for p in Path("checkpoints").rglob("*.pt")),
                                  ["final.pt", "step_00.0M.pt", "step_3.pt", "step_5.pt"])  # 7 exceeds the target
@@ -110,7 +110,7 @@ class CheckpointTests(unittest.TestCase):
 
     def test_one_update_crossing_multiple_milestones_saves_them_all(self):
         with inside_temporary_directory():
-            self.run_training(Args(total_timesteps=3, num_envs=3, track=False), (0, 1, 2, 3, 4))
+            self.run_training(Args(num_steps=2, total_timesteps=3, num_envs=3, track=False), (0, 1, 2, 3, 4))
             folder = Path("checkpoints", "scratch", "cnn", "clean", "seed_1")
             for milestone in (1, 2, 3):
                 saved = load(folder / f"step_{milestone}.pt")
@@ -123,12 +123,12 @@ class CheckpointTests(unittest.TestCase):
         milestones = (0, 3, 5, 7, 9)
         for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch), inside_temporary_directory():
-                self.run_training(Args(arch=arch, total_timesteps=6, num_envs=1, track=False), milestones)
+                self.run_training(Args(num_steps=2, arch=arch, total_timesteps=6, num_envs=1, track=False), milestones)
                 parent_path = Path("checkpoints", "scratch", arch, "clean", "seed_1", "step_3.pt")
                 parent = load(parent_path)  # milestone 3, actual step 4, actor.bias == 2
                 learning_rates = []
                 tracker = self.run_training(
-                    Args(arch=arch, use_fog=True, total_timesteps=9, num_envs=1, init_from=str(parent_path)),
+                    Args(num_steps=2, arch=arch, use_fog=True, total_timesteps=9, num_envs=1, init_from=str(parent_path)),
                     milestones, learning_rates)
                 folder = Path("checkpoints", "finetune", arch, "clean_3_to_fog", "seed_1")
                 self.assertEqual(sorted(p.name for p in folder.glob("*.pt")),
@@ -165,17 +165,17 @@ class CheckpointTests(unittest.TestCase):
 
     def test_finetune_rejects_wrong_architecture_and_exhausted_budget(self):
         with inside_temporary_directory():
-            self.run_training(Args(total_timesteps=4, num_envs=1, track=False), (0, 3))
+            self.run_training(Args(num_steps=2, total_timesteps=4, num_envs=1, track=False), (0, 3))
             parent = str(Path("checkpoints", "scratch", "cnn", "clean", "seed_1", "step_3.pt"))
             with self.assertRaisesRegex(ValueError, "architecture"):
-                self.run_training(Args(arch="lstm", total_timesteps=9, num_envs=1, init_from=parent), (0, 3))
+                self.run_training(Args(num_steps=2, arch="lstm", total_timesteps=9, num_envs=1, init_from=parent), (0, 3))
             with self.assertRaisesRegex(ValueError, "must exceed"):
-                self.run_training(Args(total_timesteps=4, num_envs=1, init_from=parent), (0, 3))
+                self.run_training(Args(num_steps=2, total_timesteps=4, num_envs=1, init_from=parent), (0, 3))
             self.assertFalse(Path("checkpoints", "finetune").exists())
 
     def test_save_disabled_creates_no_checkpoints(self):
         with inside_temporary_directory():
-            tracker = self.run_training(Args(total_timesteps=2, num_envs=1, save_model=False), (0, 1, 2))
+            tracker = self.run_training(Args(num_steps=2, total_timesteps=2, num_envs=1, save_model=False), (0, 1, 2))
             self.assertFalse(Path("checkpoints").exists())
             tracker.save.assert_not_called()
 

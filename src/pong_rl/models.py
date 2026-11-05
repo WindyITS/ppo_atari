@@ -100,6 +100,7 @@ class RecurrentAgent(nn.Module):
     All methods take observations as a flattened, time-major sequence: x[t * batch + b] is step t
     of sequence b, where batch = lstm_state[0].shape[1]. done[t * batch + b] = 1 means that
     observation is the first of a new episode, so the state is reset to zero before processing it.
+    done=None means no resets anywhere in the sequence.
     Subclasses implement get_states and define actor/critic heads on its outputs.
     """
 
@@ -107,11 +108,11 @@ class RecurrentAgent(nn.Module):
     critic: nn.Linear
 
     def get_states(
-        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None
     ) -> tuple[torch.Tensor, LSTMState]:
         raise NotImplementedError
 
-    def get_value(self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor) -> torch.Tensor:
+    def get_value(self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None) -> torch.Tensor:
         hidden, _ = self.get_states(x, lstm_state, done)
         return self.critic(hidden)
 
@@ -119,7 +120,7 @@ class RecurrentAgent(nn.Module):
         self,
         x: torch.Tensor,
         lstm_state: LSTMState,
-        done: torch.Tensor,
+        done: torch.Tensor | None,
         action: torch.Tensor | None = None,
     ):
         hidden, lstm_state = self.get_states(x, lstm_state, done)
@@ -149,14 +150,18 @@ class LSTMAgent(RecurrentAgent):
         self.critic = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, 1), std=1.0)
 
     def get_states(
-        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None
     ) -> tuple[torch.Tensor, LSTMState]:
         """Returns the per-step LSTM outputs (T * batch, hidden_size), useful for linear probing,
         and the (h, c) state after the last step."""
-        assert done.numel() == x.shape[0], "need one done flag per observation"
         features = self.network(x / 255.0)
         batch_size = lstm_state[0].shape[1]
         features = features.reshape((-1, batch_size, self.lstm.input_size))
+        if done is None:
+            # No resets inside the sequence: one cuDNN call over all steps.
+            out, lstm_state = self.lstm(features, lstm_state)
+            return torch.flatten(out, 0, 1), lstm_state
+        assert done.numel() == x.shape[0], "need one done flag per observation"
         done = done.float().reshape((-1, batch_size))
         outputs = []
         for f, d in zip(features, done):
@@ -199,40 +204,48 @@ class AttentionLSTMAgent(RecurrentAgent):
         self.query = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, heads * key_size), std=1.0)
         self.lstm = nn.LSTM(heads * value_size, LSTM_HIDDEN_SIZE)
         init_lstm(self.lstm)
+        # The time loop calls torch.lstm_cell with these weights: one layer, biases, no projection.
+        assert self.lstm.num_layers == 1 and self.lstm.bias and self.lstm.proj_size == 0
         assert isinstance(envs.single_action_space, gym.spaces.Discrete)
         self.actor = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, int(envs.single_action_space.n)), std=0.01)
         self.critic = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, 1), std=1.0)
 
     def get_states_and_attention(
-        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None
     ) -> tuple[torch.Tensor, LSTMState, torch.Tensor]:
         """Per-step LSTM outputs (T * batch, hidden), the final (h, c), and attention weights."""
-        assert done.numel() == x.shape[0], "need one done flag per observation"
         batch = lstm_state[0].shape[1]
+        assert done is None or done.numel() == x.shape[0], "need one done flag per observation"
         cells = self.encoder(x / 255.0).flatten(2).transpose(1, 2)  # (T*B, 49, 64)
         cells = torch.cat((cells, self.positions.expand(cells.shape[0], -1, -1)), dim=-1)
         n = cells.shape[1]
-        # Keys and values depend only on the frame, so compute them for all steps at once.
-        keys = F.layer_norm(self.keys(cells).reshape(-1, batch, n, self.heads, self.key_size), (self.key_size,))
-        values = self.values(cells).reshape(-1, batch, n, self.heads, self.value_size)
-        done = done.float().reshape((-1, batch))
-        h, c = lstm_state
+        # Keys and values depend only on the frame, so compute them for all steps at once,
+        # laid out (T, B, heads, cells, size) so each step's attention is two batched matmuls.
+        keys = F.layer_norm(self.keys(cells).reshape(-1, batch, n, self.heads, self.key_size),
+                            (self.key_size,)).permute(0, 1, 3, 2, 4)
+        values = self.values(cells).reshape(-1, batch, n, self.heads, self.value_size).permute(0, 1, 3, 2, 4)
+        keeps = None if done is None else (1.0 - done.float()).reshape((-1, batch, 1))
+        h, c = lstm_state[0][0], lstm_state[1][0]
+        # One fused cell per step (same parameters as self.lstm): much less per-step overhead
+        # than calling nn.LSTM on a length-1 sequence inside this loop.
+        lstm_weights = (self.lstm.weight_ih_l0, self.lstm.weight_hh_l0, self.lstm.bias_ih_l0, self.lstm.bias_hh_l0)
+        scale = 1.0 / math.sqrt(self.key_size)
         outputs, weights = [], []
-        for k, v, d in zip(keys, values, done):
-            keep = (1.0 - d).view(1, -1, 1)
-            h, c = keep * h, keep * c
+        for t, (k, v) in enumerate(zip(keys, values)):
+            if keeps is not None:
+                h, c = keeps[t] * h, keeps[t] * c
             # The query needs this step's starting memory, so attention runs inside the time loop.
-            q = F.layer_norm(self.query(h[0]).reshape(batch, self.heads, self.key_size), (self.key_size,))
-            scores = torch.einsum("bnhk,bhk->bhn", k, q) / math.sqrt(self.key_size)
-            attention = scores.softmax(dim=-1)  # (B, heads, 49)
-            readout = torch.einsum("bhn,bnhv->bhv", attention, v).reshape(batch, self.heads * self.value_size)
-            out, (h, c) = self.lstm(readout.unsqueeze(0), (h, c))
-            outputs.append(out)
+            q = F.layer_norm(self.query(h).reshape(batch, self.heads, self.key_size), (self.key_size,))
+            attention = (torch.matmul(k, q.unsqueeze(-1)).squeeze(-1) * scale).softmax(dim=-1)  # (B, heads, 49)
+            readout = torch.matmul(attention.unsqueeze(-2), v).reshape(batch, self.heads * self.value_size)
+            h, c = torch.lstm_cell(readout, (h, c), *lstm_weights)
+            outputs.append(h)
             weights.append(attention)
-        return torch.flatten(torch.cat(outputs), 0, 1), (h, c), torch.flatten(torch.stack(weights), 0, 1)
+        return (torch.stack(outputs).flatten(0, 1), (h.unsqueeze(0), c.unsqueeze(0)),
+                torch.flatten(torch.stack(weights), 0, 1))
 
     def get_states(
-        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None
     ) -> tuple[torch.Tensor, LSTMState]:
         hidden, lstm_state, _ = self.get_states_and_attention(x, lstm_state, done)
         return hidden, lstm_state

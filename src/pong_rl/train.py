@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 import random
 import tempfile
@@ -21,7 +22,7 @@ import wandb
 
 from pong_rl.envs import make_env
 from pong_rl.models import make_agent
-from pong_rl.rollouts import RallyCollector
+from pong_rl.rollouts import RolloutCollector
 from pong_rl.ppo import update_policy
 from pong_rl.metrics import Episode, EpisodeWindow
 
@@ -77,10 +78,8 @@ class Args:
     mask_enemy: bool = False
     total_timesteps: int = 15_000_000
     learning_rate: float = 0.001
-    num_envs: int = 8
-    rallies_per_update: int = 5
-    max_rally_steps: int = 512
-    rollout_scheme: str = "capped_rallies"
+    num_envs: int = 16
+    num_steps: int = 256  # steps each game plays per batch, then the PPO update
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -117,13 +116,16 @@ def parse_args() -> Args:
     parser.add_argument("--learning-rate", type=float, default=0.001,
                         help="initial Adam learning rate, annealed over the run")
     parser.add_argument("--ent-coef", type=float, default=0.02, help="PPO entropy bonus coefficient")
-    parser.add_argument("--max-rally-steps", type=int, default=512,
-                        help="pause a lane after this many steps without a point; resume next update")
+    parser.add_argument("--num-steps", type=int, default=Args.num_steps,
+                        help="steps each game plays per batch before the PPO update")
+    parser.add_argument("--update-epochs", type=int, default=Args.update_epochs, help="PPO epochs per batch")
+    parser.add_argument("--num-minibatches", type=int, default=Args.num_minibatches,
+                        help="minibatches per epoch")
+    parser.add_argument("--target-kl", type=float, default=None,
+                        help="stop a batch's remaining epochs once an epoch's mean approx KL exceeds this")
     parser.add_argument("--parallel-envs", action="store_true",
-                        help="collect active Pong lanes in separate CPU processes")
-    parser.add_argument("--num-envs", type=int, default=8)
-    parser.add_argument("--rallies-per-update", type=int, default=5,
-                        help="complete rallies per env, flushed early when its game ends")
+                        help="run each game in its own CPU process")
+    parser.add_argument("--num-envs", type=int, default=Args.num_envs, help="games played side by side")
     parser.add_argument("--replay-checkpoint-threshold", type=int, default=2048,
                         help="retain replay activations up to this many padded steps; 0 always recomputes")
     parser.add_argument("--track", action=argparse.BooleanOptionalAction, default=True)
@@ -134,7 +136,7 @@ def parse_args() -> Args:
     parser.add_argument("--report-window-steps", type=int, default=500_000,
                         help="aggregate environment-step window for episodes ending in (step-window, step]")
     parsed = parser.parse_args()
-    for name in ("report_window_steps", "rallies_per_update", "num_envs", "total_timesteps", "max_rally_steps"):
+    for name in ("report_window_steps", "num_envs", "total_timesteps"):
         if getattr(parsed, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
 
@@ -142,6 +144,11 @@ def parse_args() -> Args:
         parser.error("--learning-rate must be finite and positive")
     if not np.isfinite(parsed.ent_coef) or parsed.ent_coef < 0:
         parser.error("--ent-coef must be finite and nonnegative")
+    for name in ("update_epochs", "num_minibatches", "num_steps"):
+        if getattr(parsed, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if parsed.target_kl is not None and (not np.isfinite(parsed.target_kl) or parsed.target_kl <= 0):
+        parser.error("--target-kl must be finite and positive")
     if parsed.replay_checkpoint_threshold < 0:
         parser.error("--replay-checkpoint-threshold must be nonnegative")
 
@@ -150,7 +157,10 @@ def parse_args() -> Args:
         seed=parsed.seed,
         learning_rate=parsed.learning_rate,
         ent_coef=parsed.ent_coef,
-        max_rally_steps=parsed.max_rally_steps,
+        num_steps=parsed.num_steps,
+        update_epochs=parsed.update_epochs,
+        num_minibatches=parsed.num_minibatches,
+        target_kl=parsed.target_kl,
         replay_checkpoint_threshold=parsed.replay_checkpoint_threshold,
         parallel_envs=parsed.parallel_envs,
         arch=parsed.arch,
@@ -158,7 +168,6 @@ def parse_args() -> Args:
         mask_enemy=parsed.mask_enemy,
         total_timesteps=parsed.total_timesteps,
         num_envs=parsed.num_envs,
-        rallies_per_update=parsed.rallies_per_update,
         track=parsed.track,
         wandb_project_name=parsed.wandb_project_name,
         wandb_entity=parsed.wandb_entity,
@@ -179,6 +188,9 @@ def load_parent(path: str, arch: str) -> tuple[dict, dict]:
         raise ValueError(f"--arch {arch} does not match the parent checkpoint's architecture ({parent_arch})")
     if checkpoint.get("global_step") is None:
         raise ValueError("parent checkpoint does not record its global_step")
+    if "num_steps" not in parent_args or "rallies_per_update" in parent_args:
+        print(f"Warning: {path} was trained with rally-based batches, not fixed-length rollouts; "
+              "this fine-tune mixes collection schemes.")
     metadata = {
         "path": str(Path(path).resolve()),
         "sha256": hashlib.sha256(data).hexdigest(),
@@ -225,7 +237,7 @@ def main():
     torch.set_num_threads(1)
 
     args = parse_args()
-    for name in ("num_envs", "rallies_per_update", "total_timesteps", "num_minibatches", "update_epochs", "report_window_steps", "max_rally_steps"):
+    for name in ("num_envs", "num_steps", "total_timesteps", "num_minibatches", "update_epochs", "report_window_steps"):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
 
@@ -250,6 +262,7 @@ def main():
     log_dir = Path("logs") / run["dir"]
     log_dir.mkdir(parents=True, exist_ok=True)
     episode_log_path = log_dir / f"episodes_{started}.jsonl"
+    update_log_path = log_dir / f"updates_{started}.jsonl"  # per-update PPO diagnostics and timing
     print(f"Episode outcomes: {episode_log_path}")
 
     if args.track:
@@ -330,9 +343,8 @@ def main():
         if args.save_model:
             # Save the starting weights (random, or the parent's) before collecting experience or updating.
             save_checkpoint(agent, args, run, start_step, 0, 0, checkpoint_step=initial_checkpoint)
-        collector = RallyCollector(envs, agent, device, args.seed, args.rallies_per_update, start_step,
-                                   max_rally_steps=args.max_rally_steps)
-        # Finish the last batch at point, cap or game boundaries; steps may exceed the target.
+        collector = RolloutCollector(envs, agent, device, args.seed, args.num_steps, start_step)
+        # The last batch is always completed, so steps may exceed the target by less than one batch.
         while collector.global_step < args.total_timesteps:
             iteration += 1
             if args.anneal_lr:
@@ -357,9 +369,20 @@ def main():
             sps = int((global_step - start_step) / (time.time() - start_time))
             window_metrics = episode_window.metrics(global_step)
             print(f"[{tag}|s{args.seed}] update={iteration}, step={global_step}/{args.total_timesteps}, "
-                  f"batch_steps={batch.steps}, rallies={batch.completed_rallies}, "
-                  f"ended_games={batch.ended_games}, capped_rallies={batch.capped_rallies}, SPS={sps}, "
+                  f"batch_steps={batch.steps}, points={batch.points}, "
+                  f"ended_games={batch.ended_games}, SPS={sps}, "
                   f"collect_s={collection_seconds:.3f}, update_s={update_seconds:.3f}")
+            with open(update_log_path, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"update": iteration, "global_step": global_step,
+                                         "batch_steps": batch.steps, "sequences": len(batch.sequences),
+                                         "points": batch.points, "ended_games": batch.ended_games,
+                                         "learning_rate": optimizer.param_groups[0]["lr"],
+                                         "optimizer_steps": optimizer_steps,
+                                         "collect_s": collection_seconds, "update_s": update_seconds,
+                                         "wall_s": time.time() - start_time,
+                                         # Strict JSON: e.g. explained variance is NaN for constant returns.
+                                         **{key: value if math.isfinite(value) else None
+                                            for key, value in losses.items()}}, allow_nan=False) + "\n")
             if args.track:
                 wandb.log({**losses,
                            "charts/learning_rate": optimizer.param_groups[0]["lr"],
@@ -369,11 +392,9 @@ def main():
                            "charts/steps_since_start": global_step - start_step,
                            "charts/updates": iteration, "charts/optimizer_steps": optimizer_steps,
                            "charts/batch/steps": batch.steps,
-                           "charts/batch/completed_rallies": batch.completed_rallies,
-                           "charts/batch/sequences": len(batch.rallies),
-                           "charts/batch/max_sequence_steps": max(map(len, batch.rallies)),
+                           "charts/batch/points": batch.points,
+                           "charts/batch/sequences": len(batch.sequences),
                            "charts/batch/ended_games": batch.ended_games,
-                           "charts/batch/capped_rallies": batch.capped_rallies,
                            "charts/budget_overshoot_steps": max(0, global_step - args.total_timesteps),
                            **{f"charts/window/{key}": value for key, value in window_metrics.items()}})
     finally:
