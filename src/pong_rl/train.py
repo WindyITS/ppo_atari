@@ -2,6 +2,7 @@
 # https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
 # https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_atari_lstmpy
 import argparse
+import json
 import os
 import random
 import time
@@ -17,6 +18,7 @@ import wandb
 
 from pong_rl.envs import make_env
 from pong_rl.models import Agent, LSTMAgent, zero_lstm_state
+from pong_rl.metrics import Episode, EpisodeWindow
 
 gym.register_envs(ale_py)
 
@@ -35,6 +37,7 @@ class Args:
     wandb_entity: str | None = None
     capture_video: bool = False
     save_model: bool = True
+    report_window_steps: int = 500_000
 
     # Algorithm specific arguments
     env_id: str = "ALE/Pong-v5"
@@ -83,7 +86,11 @@ def parse_args() -> Args:
     parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--capture-video", action="store_true")
     parser.add_argument("--save-model", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--report-window-steps", type=int, default=500_000,
+                        help="aggregate environment-step window for episodes ending in (step-window, step]")
     parsed = parser.parse_args()
+    if parsed.report_window_steps <= 0:
+        parser.error("--report-window-steps must be positive")
 
     return Args(
         exp_name=parsed.exp_name,
@@ -98,6 +105,7 @@ def parse_args() -> Args:
         wandb_entity=parsed.wandb_entity,
         capture_video=parsed.capture_video,
         save_model=parsed.save_model,
+        report_window_steps=parsed.report_window_steps,
     )
 
 
@@ -115,6 +123,10 @@ def main():
     condition = f"fog_{int(args.use_fog)}_mask_{int(args.mask_enemy)}"
     tag = f"{args.arch}_{condition}"
     run_name = f"pong__{tag}__seed_{args.seed}__{int(time.time())}"
+    episode_window = EpisodeWindow(args.report_window_steps)
+    os.makedirs("logs", exist_ok=True)
+    episode_log_path = os.path.join("logs", f"{run_name}_episodes.jsonl")
+    print(f"Episode outcomes: {episode_log_path}")
 
     if args.track:
         wandb.init(
@@ -225,12 +237,24 @@ def main():
                     if has_ep:
                         ep_return = float(final_info["episode"]["r"][i])
                         ep_length = int(final_info["episode"]["l"][i])
-                        print(f"[{tag}|s{args.seed}] step={global_step}, return={ep_return}")
+                        episode = Episode(global_step, ep_return, ep_length,
+                                          bool(terminations[i]), bool(truncations[i]))
+                        episode_window.add(episode)
+                        with open(episode_log_path, "a", encoding="utf-8") as stream:
+                            stream.write(json.dumps({"arch": args.arch, "seed": args.seed,
+                                                     "condition": condition, **episode.to_dict()},
+                                                    allow_nan=False) + "\n")
+                        print(f"[{tag}|s{args.seed}] step={global_step}, return={ep_return}, "
+                              f"length={ep_length}, outcome={episode.outcome}, "
+                              f"terminated={int(episode.terminated)}, truncated={int(episode.truncated)}")
                         if args.track:
                             wandb.log(
                                 {
                                     "charts/episodic_return": ep_return,
                                     "charts/episodic_length": ep_length,
+                                    "charts/episode_terminated": int(episode.terminated),
+                                    "charts/episode_truncated": int(episode.truncated),
+                                    "charts/episode_outcome": episode.outcome,
                                     "global_step": global_step,
                                 }
                             )
@@ -339,9 +363,17 @@ def main():
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
         sps = int(global_step / (time.time() - start_time))
+        window_metrics = episode_window.metrics(global_step)
 
         if iteration % 25 == 0:
             print(f"[{tag}|s{args.seed}] iter={iteration}/{args.num_iterations}, step={global_step}, SPS={sps}")
+            print(f"[{tag}|s{args.seed}] reporting_window="
+                  f"({window_metrics['start_step_exclusive']},{global_step}], "
+                  f"episodes={window_metrics['episodes']}, mean_return={window_metrics['mean_return']}, "
+                  f"mean_length={window_metrics['mean_episode_length']}, "
+                  f"completed_games={window_metrics['completed_games']}, "
+                  f"completed_win_rate={window_metrics['completed_win_rate']}, "
+                  f"timeouts={window_metrics['timeouts']}")
 
         if args.track:
             wandb.log(
@@ -356,6 +388,7 @@ def main():
                     "losses/explained_variance": explained_var,
                     "charts/SPS": sps,
                     "global_step": global_step,
+                    **{f"charts/window/{key}": value for key, value in window_metrics.items()},
                 }
             )
 
