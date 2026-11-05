@@ -92,6 +92,8 @@ class Args:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: float | None = None
+    replay_checkpoint_threshold: int = 2048
+    parallel_envs: bool = False
 
 
 def parse_args() -> Args:
@@ -111,9 +113,13 @@ def parse_args() -> Args:
                         help="target aggregate environment step; a fine-tune continues its parent's step count")
     parser.add_argument("--init-from", type=str, default=None,
                         help="checkpoint to fine-tune from (same --arch); fresh Adam, LR annealed over the fine-tune")
+    parser.add_argument("--parallel-envs", action="store_true",
+                        help="collect active Pong lanes in separate CPU processes")
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--rallies-per-update", type=int, default=5,
                         help="complete rallies per env, flushed early when its game ends")
+    parser.add_argument("--replay-checkpoint-threshold", type=int, default=2048,
+                        help="retain replay activations up to this many padded steps; 0 always recomputes")
     parser.add_argument("--track", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--wandb-project-name", type=str, default="pong-rl")
     parser.add_argument("--wandb-entity", type=str, default=None)
@@ -126,9 +132,14 @@ def parse_args() -> Args:
         if getattr(parsed, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
 
+    if parsed.replay_checkpoint_threshold < 0:
+        parser.error("--replay-checkpoint-threshold must be nonnegative")
+
     return Args(
         exp_name=parsed.exp_name,
         seed=parsed.seed,
+        replay_checkpoint_threshold=parsed.replay_checkpoint_threshold,
+        parallel_envs=parsed.parallel_envs,
         arch=parsed.arch,
         use_fog=parsed.use_fog,
         mask_enemy=parsed.mask_enemy,
@@ -255,7 +266,9 @@ def main():
     print(f"[{run_name}] Using device: {device}")
 
     # Env setup
-    envs = gym.vector.SyncVectorEnv(
+    from pong_rl.parallel_envs import ParallelEnvPool
+
+    envs = (ParallelEnvPool if args.parallel_envs else gym.vector.SyncVectorEnv)(
         [
             make_env(
                 args.env_id,
@@ -268,7 +281,7 @@ def main():
             )
             for i in range(args.num_envs)
         ],
-        autoreset_mode=gym.vector.AutoresetMode.DISABLED,
+        **({} if args.parallel_envs else {"autoreset_mode": gym.vector.AutoresetMode.DISABLED}),
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     assert envs.single_observation_space.shape is not None
@@ -312,9 +325,13 @@ def main():
                 # Anneal over this run's own steps, so a fine-tune restarts from the base learning rate.
                 optimizer.param_groups[0]["lr"] = args.learning_rate * max(
                     0.0, 1.0 - (collector.global_step - start_step) / (args.total_timesteps - start_step))
+            collection_started = time.perf_counter()
             batch = collector.collect(args.gamma, args.gae_lambda, on_episode)
+            collection_seconds = time.perf_counter() - collection_started
             global_step = batch.global_step
+            update_started = time.perf_counter()
             losses = update_policy(agent, optimizer, batch, args, device)
+            update_seconds = time.perf_counter() - update_started
             optimizer_steps += losses.pop("charts/optimizer_steps")
             # Save the first completed policy update at/after each milestone. A
             # long batch may cross multiple milestones; none should be skipped.
@@ -327,11 +344,14 @@ def main():
             window_metrics = episode_window.metrics(global_step)
             print(f"[{tag}|s{args.seed}] update={iteration}, step={global_step}/{args.total_timesteps}, "
                   f"batch_steps={batch.steps}, rallies={batch.completed_rallies}, "
-                  f"ended_games={batch.ended_games}, SPS={sps}")
+                  f"ended_games={batch.ended_games}, SPS={sps}, "
+                  f"collect_s={collection_seconds:.3f}, update_s={update_seconds:.3f}")
             if args.track:
                 wandb.log({**losses,
                            "charts/learning_rate": optimizer.param_groups[0]["lr"],
                            "charts/SPS": sps, "global_step": global_step,
+                           "timing/collection_seconds": collection_seconds,
+                           "timing/update_seconds": update_seconds,
                            "charts/steps_since_start": global_step - start_step,
                            "charts/updates": iteration, "charts/optimizer_steps": optimizer_steps,
                            "charts/batch/steps": batch.steps,

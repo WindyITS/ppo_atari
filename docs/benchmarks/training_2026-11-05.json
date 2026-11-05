@@ -1,0 +1,579 @@
+{
+  "baseline_commit": "8bf01a9",
+  "hardware": "NVIDIA GeForce RTX 3070",
+  "seed": 99,
+  "architecture": "attn_lstm",
+  "notes": "GPU experiments were run sequentially. Early serial benchmark overlapped CPU tests. Timings exclude two warmup iterations; subprocess startup and W&B/checkpoint I/O are excluded.",
+  "baseline": [
+    {
+      "iteration": 0,
+      "steps": 1915,
+      "collect": 1.1038604720379226,
+      "update": 2.109563340956811
+    },
+    {
+      "iteration": 1,
+      "steps": 1679,
+      "collect": 0.7296463310485706,
+      "update": 1.633539453963749
+    },
+    {
+      "iteration": 2,
+      "steps": 1609,
+      "collect": 0.6850277779740281,
+      "update": 1.599959071027115
+    },
+    {
+      "iteration": 3,
+      "steps": 1556,
+      "collect": 0.6837328650290146,
+      "update": 1.3119446630007587
+    },
+    {
+      "iteration": 4,
+      "steps": 481,
+      "collect": 0.25839528802316636,
+      "update": 0.8703447590232827
+    },
+    {
+      "iteration": 5,
+      "steps": 1892,
+      "collect": 0.8013134429929778,
+      "update": 1.6320627909735776
+    },
+    {
+      "iteration": 6,
+      "steps": 1740,
+      "collect": 0.7448606109828688,
+      "update": 1.402670654002577
+    },
+    {
+      "iteration": 7,
+      "steps": 1546,
+      "collect": 0.6879753859830089,
+      "update": 1.4480140650412068
+    },
+    {
+      "iteration": 8,
+      "steps": 1622,
+      "collect": 0.6951052690274082,
+      "update": 1.401786912989337
+    },
+    {
+      "iteration": 9,
+      "steps": 944,
+      "collect": 0.5027730920119211,
+      "update": 1.7401990090147592
+    },
+    {
+      "iteration": 10,
+      "steps": 1941,
+      "collect": 0.844000426994171,
+      "update": 1.9995976549689658
+    },
+    {
+      "iteration": 11,
+      "steps": 1507,
+      "collect": 0.6273435089970008,
+      "update": 1.1979394379886799
+    },
+    {
+      "summary": true,
+      "sps": 702.056646498757,
+      "collection_seconds": 6.530527668015566,
+      "update_seconds": 14.60451901803026
+    }
+  ],
+  "ppo_ablations": [
+    {
+      "variant": "baseline",
+      "seconds": 1.6278183810063638,
+      "peak_mib": 89.48779296875,
+      "all_seconds": [
+        2.0703061430249363,
+        1.6328682100283913,
+        1.6278183810063638,
+        1.553062662947923
+      ]
+    },
+    {
+      "variant": "less_sync",
+      "seconds": 1.4734705419978127,
+      "peak_mib": 89.51953125,
+      "all_seconds": [
+        1.55261612997856,
+        1.4734705419978127,
+        1.552262830955442,
+        1.469477228994947
+      ]
+    },
+    {
+      "variant": "less_sync_no_recompute",
+      "seconds": 0.8901930639985949,
+      "peak_mib": 200.12939453125,
+      "all_seconds": [
+        0.8920671789674088,
+        0.8901930639985949,
+        0.8903037309646606,
+        0.8896003240370192
+      ]
+    },
+    {
+      "variant": "less_sync_less_padding",
+      "seconds": 1.6932232920080423,
+      "peak_mib": 89.49755859375,
+      "all_seconds": [
+        1.7507811799878255,
+        1.6796503699733876,
+        1.7616208090330474,
+        1.6932232920080423
+      ]
+    },
+    {
+      "variant": "combined",
+      "seconds": 1.0430984090198763,
+      "peak_mib": 143.68798828125,
+      "all_seconds": [
+        1.0469619279610924,
+        1.0430984090198763,
+        1.0406680119922385,
+        1.0442719989805482
+      ]
+    }
+  ],
+  "collection_ablations": [
+    {
+      "mode": "serial",
+      "steps": 11403,
+      "seconds": 5.108425772050396,
+      "sps": 2232.194517220736
+    },
+    {
+      "mode": "thread",
+      "steps": 11403,
+      "seconds": 16.991539960959926,
+      "sps": 671.0986777066553
+    },
+    {
+      "mode": "process",
+      "steps": 11403,
+      "seconds": 3.5668988108518533,
+      "sps": 3196.8947269565842
+    }
+  ],
+  "optimized_serial": [
+    {
+      "configuration": {
+        "iterations": 12,
+        "warmup": 2,
+        "parallel_envs": false,
+        "replay_checkpoint_threshold": 2048,
+        "no_distribution_validation": false
+      },
+      "device": "cuda",
+      "torch": "2.15.0+cu132",
+      "gpu": "NVIDIA GeForce RTX 3070"
+    },
+    {
+      "iteration": 0,
+      "steps": 1915,
+      "collect": 1.2485358230187558,
+      "update": 1.5241790699656121
+    },
+    {
+      "iteration": 1,
+      "steps": 1679,
+      "collect": 0.8253541010199115,
+      "update": 1.12407262501074
+    },
+    {
+      "iteration": 2,
+      "steps": 1609,
+      "collect": 0.7751599170151167,
+      "update": 1.0469713310012594
+    },
+    {
+      "iteration": 3,
+      "steps": 1556,
+      "collect": 0.7724473880371079,
+      "update": 0.9005518869962543
+    },
+    {
+      "iteration": 4,
+      "steps": 481,
+      "collect": 0.2961350730038248,
+      "update": 0.6417739239986986
+    },
+    {
+      "iteration": 5,
+      "steps": 1892,
+      "collect": 0.9355592409847304,
+      "update": 1.0897612440166995
+    },
+    {
+      "iteration": 6,
+      "steps": 1740,
+      "collect": 0.874465306987986,
+      "update": 0.991253977001179
+    },
+    {
+      "iteration": 7,
+      "steps": 1546,
+      "collect": 0.8008409840404056,
+      "update": 0.9617198790074326
+    },
+    {
+      "iteration": 8,
+      "steps": 1622,
+      "collect": 0.833044892991893,
+      "update": 0.9674856450292282
+    },
+    {
+      "iteration": 9,
+      "steps": 944,
+      "collect": 0.559546955046244,
+      "update": 1.1707322049769573
+    },
+    {
+      "iteration": 10,
+      "steps": 1941,
+      "collect": 0.939854666008614,
+      "update": 1.307267482043244
+    },
+    {
+      "iteration": 11,
+      "steps": 1507,
+      "collect": 0.7107306309626438,
+      "update": 0.818559565988835
+    },
+    {
+      "summary": true,
+      "sps": 853.0595352277353,
+      "collection_seconds": 7.497785055078566,
+      "update_seconds": 9.896077140059788
+    }
+  ],
+  "optimized_parallel_validated": [
+    {
+      "configuration": {
+        "iterations": 12,
+        "warmup": 2,
+        "parallel_envs": true,
+        "replay_checkpoint_threshold": 2048,
+        "no_distribution_validation": false
+      },
+      "device": "cuda",
+      "torch": "2.15.0+cu132",
+      "gpu": "NVIDIA GeForce RTX 3070"
+    },
+    {
+      "iteration": 0,
+      "steps": 1915,
+      "collect": 1.5547648969804868,
+      "update": 1.2799635300179943
+    },
+    {
+      "iteration": 1,
+      "steps": 1679,
+      "collect": 0.4732826189720072,
+      "update": 0.9733295559999533
+    },
+    {
+      "iteration": 2,
+      "steps": 1609,
+      "collect": 0.5449248320073821,
+      "update": 0.908330187026877
+    },
+    {
+      "iteration": 3,
+      "steps": 1556,
+      "collect": 0.6563581700320356,
+      "update": 0.7864418450044468
+    },
+    {
+      "iteration": 4,
+      "steps": 481,
+      "collect": 0.31641559302806854,
+      "update": 0.5475267610163428
+    },
+    {
+      "iteration": 5,
+      "steps": 1892,
+      "collect": 0.5128791710012592,
+      "update": 0.9176930459798314
+    },
+    {
+      "iteration": 6,
+      "steps": 1740,
+      "collect": 0.8489654039731249,
+      "update": 0.8281988460221328
+    },
+    {
+      "iteration": 7,
+      "steps": 1546,
+      "collect": 0.4996817269711755,
+      "update": 0.8147739620180801
+    },
+    {
+      "iteration": 8,
+      "steps": 1622,
+      "collect": 0.5197913160081953,
+      "update": 0.8338180729770102
+    },
+    {
+      "iteration": 9,
+      "steps": 944,
+      "collect": 0.37020082102390006,
+      "update": 1.0139041210059077
+    },
+    {
+      "iteration": 10,
+      "steps": 1941,
+      "collect": 0.5829323019715957,
+      "update": 1.132197333034128
+    },
+    {
+      "iteration": 11,
+      "steps": 1507,
+      "collect": 0.36637093604076654,
+      "update": 0.7202376239583828
+    },
+    {
+      "summary": true,
+      "sps": 1081.3574588373715,
+      "collection_seconds": 5.2185202720575035,
+      "update_seconds": 8.50312179804314
+    }
+  ],
+  "extra_ablations": [
+    {
+      "variant": "optimized_validated",
+      "seconds": 0.8921505530015565,
+      "all_seconds": [
+        1.345828867983073,
+        0.8914806710090488,
+        0.8921505530015565,
+        0.8925763250445016
+      ]
+    },
+    {
+      "variant": "no_validation",
+      "seconds": 0.88756200496573,
+      "all_seconds": [
+        0.8863494659890421,
+        0.8845086499932222,
+        0.8955336370272562,
+        0.88756200496573
+      ]
+    },
+    {
+      "variant": "no_validation_static_index",
+      "seconds": 0.8837439870112576,
+      "all_seconds": [
+        0.8832474880036898,
+        0.88481367303757,
+        0.8821310899802484,
+        0.8837439870112576
+      ]
+    }
+  ],
+  "final": [
+    {
+      "configuration": {
+        "iterations": 30,
+        "warmup": 2,
+        "parallel_envs": true,
+        "replay_checkpoint_threshold": 2048
+      },
+      "device": "cuda",
+      "torch": "2.15.0+cu132",
+      "gpu": "NVIDIA GeForce RTX 3070"
+    },
+    {
+      "iteration": 0,
+      "steps": 1915,
+      "collect": 1.6122186169959605,
+      "update": 1.285352369013708
+    },
+    {
+      "iteration": 1,
+      "steps": 1679,
+      "collect": 0.40620570798637345,
+      "update": 0.9764378719846718
+    },
+    {
+      "iteration": 2,
+      "steps": 1609,
+      "collect": 0.5524911899701692,
+      "update": 0.9044907150091603
+    },
+    {
+      "iteration": 3,
+      "steps": 1556,
+      "collect": 0.4620373789803125,
+      "update": 0.7930566460127011
+    },
+    {
+      "iteration": 4,
+      "steps": 481,
+      "collect": 0.182531287020538,
+      "update": 0.5503403579932638
+    },
+    {
+      "iteration": 5,
+      "steps": 1892,
+      "collect": 0.7596022850484587,
+      "update": 0.9413838309701532
+    },
+    {
+      "iteration": 6,
+      "steps": 1740,
+      "collect": 0.523191740969196,
+      "update": 0.8405708060017787
+    },
+    {
+      "iteration": 7,
+      "steps": 1546,
+      "collect": 0.532508568954654,
+      "update": 0.8225599810248241
+    },
+    {
+      "iteration": 8,
+      "steps": 1622,
+      "collect": 0.508612230012659,
+      "update": 0.8350865939864889
+    },
+    {
+      "iteration": 9,
+      "steps": 944,
+      "collect": 0.5014463869738393,
+      "update": 1.029438020021189
+    },
+    {
+      "iteration": 10,
+      "steps": 1941,
+      "collect": 0.8018160950159654,
+      "update": 1.1452304089907557
+    },
+    {
+      "iteration": 11,
+      "steps": 1507,
+      "collect": 0.34566708403872326,
+      "update": 0.7257288199616596
+    },
+    {
+      "iteration": 12,
+      "steps": 1625,
+      "collect": 0.5013842760236003,
+      "update": 0.9799223570153117
+    },
+    {
+      "iteration": 13,
+      "steps": 1551,
+      "collect": 0.3763808740186505,
+      "update": 0.772030399995856
+    },
+    {
+      "iteration": 14,
+      "steps": 455,
+      "collect": 0.2835522040259093,
+      "update": 0.39155020198086277
+    },
+    {
+      "iteration": 15,
+      "steps": 2110,
+      "collect": 0.5651165999588557,
+      "update": 1.2501010980340652
+    },
+    {
+      "iteration": 16,
+      "steps": 1912,
+      "collect": 0.7881404220242985,
+      "update": 1.2383654239820316
+    },
+    {
+      "iteration": 17,
+      "steps": 1490,
+      "collect": 0.5344629540340975,
+      "update": 0.6835291089955717
+    },
+    {
+      "iteration": 18,
+      "steps": 2043,
+      "collect": 0.682640551996883,
+      "update": 1.0707861660048366
+    },
+    {
+      "iteration": 19,
+      "steps": 613,
+      "collect": 0.2302031459985301,
+      "update": 0.6241506279911846
+    },
+    {
+      "iteration": 20,
+      "steps": 2069,
+      "collect": 0.7167205549776554,
+      "update": 1.0652940740110353
+    },
+    {
+      "iteration": 21,
+      "steps": 1732,
+      "collect": 0.5073227449902333,
+      "update": 1.239016633015126
+    },
+    {
+      "iteration": 22,
+      "steps": 1634,
+      "collect": 0.5901391429943033,
+      "update": 1.0444348340388387
+    },
+    {
+      "iteration": 23,
+      "steps": 1738,
+      "collect": 0.5170527230366133,
+      "update": 1.0537359759910032
+    },
+    {
+      "iteration": 24,
+      "steps": 668,
+      "collect": 0.3620259859599173,
+      "update": 0.9317761170095764
+    },
+    {
+      "iteration": 25,
+      "steps": 2225,
+      "collect": 0.6448398240027018,
+      "update": 1.197752768988721
+    },
+    {
+      "iteration": 26,
+      "steps": 1456,
+      "collect": 0.34878900402691215,
+      "update": 0.5859885590034537
+    },
+    {
+      "iteration": 27,
+      "steps": 1430,
+      "collect": 0.33041034499183297,
+      "update": 0.5294854300445877
+    },
+    {
+      "iteration": 28,
+      "steps": 1579,
+      "collect": 0.5433871389832348,
+      "update": 0.9087975979782641
+    },
+    {
+      "iteration": 29,
+      "steps": 649,
+      "collect": 0.33985495200613514,
+      "update": 0.7922936709946953
+    },
+    {
+      "summary": true,
+      "sps": 1072.8022450427773,
+      "collection_seconds": 14.03232769103488,
+      "update_seconds": 24.946897225046996
+    }
+  ]
+}

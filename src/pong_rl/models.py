@@ -86,7 +86,9 @@ class Agent(nn.Module):
     def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor | None = None):
         hidden = self.get_hidden(x)
         logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
+        # Actions are sampled here or replayed from the collector. Avoid repeated
+        # CUDA validation synchronizations; PPO checks aggregate losses for finiteness.
+        probs = Categorical(logits=logits, validate_args=False)
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
@@ -122,7 +124,9 @@ class RecurrentAgent(nn.Module):
     ):
         hidden, lstm_state = self.get_states(x, lstm_state, done)
         logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
+        # Actions are sampled here or replayed from the collector. Avoid repeated
+        # CUDA validation synchronizations; PPO checks aggregate losses for finiteness.
+        probs = Categorical(logits=logits, validate_args=False)
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden), lstm_state

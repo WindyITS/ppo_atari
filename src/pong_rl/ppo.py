@@ -1,5 +1,7 @@
 """PPO updates for variable batches, preserving complete recurrent rally sequences."""
 
+import math
+
 import numpy as np
 import torch
 from torch.utils.checkpoint import checkpoint
@@ -12,12 +14,13 @@ def replay_rally(agent, rally, device, checkpoint_steps=32):
     return replay_rallies(agent, [rally], device, checkpoint_steps)
 
 
-def replay_rallies(agent, rallies, device, checkpoint_steps=32):
+def replay_rallies(agent, rallies, device, checkpoint_steps=32, checkpoint_threshold=0):
     """Replay padded rallies together; return only real steps in rally order.
 
     Each lane starts with its own saved memory. Padding follows real steps and
     contributes no loss. Chunk boundaries preserve the full recurrent gradient.
-    Images remain on CPU until their checkpoint chunk is needed.
+    Small batches can retain activations; larger batches recompute checkpoint
+    chunks to bound accelerator memory. Neither mode truncates gradients.
     """
     lengths = [len(r) for r in rallies]
     batch = len(rallies)
@@ -38,36 +41,41 @@ def replay_rallies(agent, rallies, device, checkpoint_steps=32):
             torch.zeros(act.numel(), device=device), act.flatten().to(device))
         return logp, entropy, value.flatten(), h, c
 
+    use_checkpoint = steps * batch > checkpoint_threshold
     for start in range(0, steps, checkpoint_steps):
-        result = checkpoint(replay, observations[start:start+checkpoint_steps],
-                            actions[start:start+checkpoint_steps], *state,
-                            use_reentrant=False)
+        inputs = (observations[start:start+checkpoint_steps],
+                  actions[start:start+checkpoint_steps], *state)
+        result = (checkpoint(replay, *inputs, use_reentrant=False)
+                  if use_checkpoint else replay(*inputs))
         state = result[3:]
         for chunks, result_tensor in zip(outputs, result[:3]):
             chunks.append(result_tensor.reshape(-1, batch))
-    valid = torch.arange(steps, device=device)[None, :] < torch.tensor(lengths, device=device)[:, None]
-    return tuple(torch.cat(chunks).transpose(0, 1)[valid] for chunks in outputs)
+    # Known CPU lengths avoid CUDA boolean indexing and its dynamic-size sync.
+    indices = torch.cat([torch.arange(length) * batch + lane
+                         for lane, length in enumerate(lengths)]).to(device)
+    return tuple(torch.cat(chunks).flatten().index_select(0, indices) for chunks in outputs)
 
 
 def update_policy(agent, optimizer, batch, args, device):
     rallies = batch.rallies
     offsets = np.cumsum([0] + [len(r) for r in rallies])
-    old_logp = torch.cat([r.logprobs for r in rallies])
-    old_values = torch.cat([r.values for r in rallies])
+    old_logp = torch.cat([r.logprobs for r in rallies]).to(device)
+    old_values = torch.cat([r.values for r in rallies]).to(device)
     advantages = torch.cat([r.advantages for r in rallies])
-    returns = torch.cat([r.returns for r in rallies])
+    returns = torch.cat([r.returns for r in rallies]).to(device)
     if args.norm_adv:
         # Normalize over the actual batch for both architectures, including tiny remainders.
         advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
+    advantages = advantages.to(device)
     recurrent = isinstance(agent, RecurrentAgent)
     observations = None if recurrent else torch.cat([r.observations for r in rallies])
     actions = torch.cat([r.actions for r in rallies])
-    totals = {key: 0.0 for key in ("value_loss", "policy_loss", "entropy", "old_approx_kl", "approx_kl", "clipfrac")}
+    totals = {key: torch.zeros((), device=device) for key in ("value_loss", "policy_loss", "entropy", "old_approx_kl", "approx_kl", "clipfrac")}
     samples = 0
     optimizer_steps = 0
 
     for _ in range(args.update_epochs):
-        epoch_kl, epoch_samples = 0.0, 0
+        epoch_kl, epoch_samples = torch.zeros((), device=device), 0
         if recurrent:
             # Balance real step counts while preserving complete rallies.
             order = np.random.permutation(len(rallies)).tolist()
@@ -96,18 +104,19 @@ def update_policy(agent, optimizer, batch, args, device):
             for indices, rally_index in units:
                 if recurrent:
                     newlogp, entropy, newvalue = replay_rallies(
-                        agent, [rallies[i] for i in rally_index], device)
+                        agent, [rallies[i] for i in rally_index], device,
+                        checkpoint_threshold=args.replay_checkpoint_threshold)
                 else:
                     _, newlogp, entropy, newvalue = agent.get_action_and_value(
                         observations[indices].to(device=device, dtype=torch.float32), actions[indices].to(device))
                     newvalue = newvalue.flatten()
-                logratio = newlogp - old_logp[indices].to(device)
+                logratio = newlogp - old_logp[indices]
                 ratio = logratio.exp()
-                adv = advantages[indices].to(device)
+                adv = advantages[indices]
                 pg_loss = torch.maximum(-adv * ratio, -adv * ratio.clamp(1-args.clip_coef, 1+args.clip_coef)).mean()
-                targets = returns[indices].to(device)
+                targets = returns[indices]
                 if args.clip_vloss:
-                    old = old_values[indices].to(device)
+                    old = old_values[indices]
                     clipped = old + (newvalue - old).clamp(-args.clip_coef, args.clip_coef)
                     v_loss = 0.5 * torch.maximum((newvalue-targets).square(), (clipped-targets).square()).mean()
                 else:
@@ -118,10 +127,10 @@ def update_policy(agent, optimizer, batch, args, device):
                 loss = pg_loss - args.ent_coef * entropy_loss + args.vf_coef * v_loss
                 (loss * (count / size)).backward()
                 with torch.no_grad():
-                    kl = ((ratio - 1) - logratio).mean().item()
-                    metrics = dict(value_loss=v_loss.item(), policy_loss=pg_loss.item(),
-                                   entropy=entropy_loss.item(), old_approx_kl=(-logratio).mean().item(),
-                                   approx_kl=kl, clipfrac=((ratio-1).abs() > args.clip_coef).float().mean().item())
+                    kl = ((ratio - 1) - logratio).mean()
+                    metrics = dict(value_loss=v_loss.detach(), policy_loss=pg_loss.detach(),
+                                   entropy=entropy_loss.detach(), old_approx_kl=(-logratio).mean(),
+                                   approx_kl=kl, clipfrac=((ratio-1).abs() > args.clip_coef).float().mean())
                 for key, value in metrics.items():
                     totals[key] += value * count
                 samples += count
@@ -135,5 +144,8 @@ def update_policy(agent, optimizer, batch, args, device):
 
     variance = returns.var(unbiased=False).item()
     explained = 1 - (returns-old_values).var(unbiased=False).item() / variance if variance else float("nan")
-    return {**{f"losses/{key}": value / samples for key, value in totals.items()},
+    metric_values = (torch.stack(list(totals.values())) / samples).cpu().tolist()
+    if not all(math.isfinite(value) for value in metric_values):
+        raise FloatingPointError("Non-finite PPO loss; stopping training")
+    return {**{f"losses/{key}": value for key, value in zip(totals, metric_values)},
             "losses/explained_variance": explained, "charts/optimizer_steps": optimizer_steps}

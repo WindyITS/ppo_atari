@@ -8,6 +8,7 @@ import torch
 
 from pong_rl.models import LSTMAgent, make_agent, zero_lstm_state
 from pong_rl.ppo import replay_rallies, replay_rally, update_policy
+from pong_rl.parallel_envs import ParallelEnvPool
 from pong_rl.rollouts import Rally, RallyCollector
 from pong_rl.train import Args
 
@@ -82,6 +83,37 @@ class RallyTrainingTests(unittest.TestCase):
             self.assertEqual(collector.state[0].count_nonzero(), 0)
         finally:
             envs.close()
+
+    def test_parallel_collection_matches_serial_pauses_timeouts_and_memory(self):
+        factories = [lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([1,2,1,2,1,2,1])),
+                     lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([2,5], timeout_at=4))]
+        serial = gym.vector.SyncVectorEnv(factories)
+        parallel = ParallelEnvPool(factories)
+        try:
+            collectors = [RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1)
+                          for envs in (serial, parallel)]
+            for _ in range(2):
+                episodes = [[], []]
+                expected, actual = [collector.collect(0.99, 0.95, events.append)
+                                    for collector, events in zip(collectors, episodes)]
+                self.assertEqual(episodes[0], episodes[1])
+                self.assertEqual(expected.global_step, actual.global_step)
+                self.assertEqual(expected.completed_rallies, actual.completed_rallies)
+                self.assertEqual(expected.ended_games, actual.ended_games)
+                self.assertEqual(len(expected.rallies), len(actual.rallies))
+                for left, right in zip(expected.rallies, actual.rallies):
+                    for name in ("observations", "actions", "logprobs", "values", "advantages", "returns"):
+                        torch.testing.assert_close(getattr(left, name), getattr(right, name))
+                    for x, y in zip(left.initial_state, right.initial_state):
+                        torch.testing.assert_close(x, y)
+        finally:
+            serial.close()
+            parallel.close()
+        self.assertTrue(all(not worker.is_alive() for worker in parallel.processes))
+
+    def test_parallel_worker_initialization_errors_are_reported(self):
+        with self.assertRaisesRegex(RuntimeError, "ZeroDivisionError"):
+            ParallelEnvPool([lambda: 1 / 0])
 
     def test_timeout_flushes_partial_rally_and_bootstraps_before_reset(self):
         envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(
@@ -167,7 +199,9 @@ class RallyTrainingTests(unittest.TestCase):
                         obs.float(), initial, zeros, actions)
                     for parts, output in zip(expected, (logp, entropy, value.flatten())):
                         parts.append(output)
-                actual = replay_rallies(agent, rallies, torch.device("cpu"))
+                # Exercise retained activations as well as checkpoint recomputation.
+                actual = replay_rallies(agent, rallies, torch.device("cpu"),
+                                        checkpoint_threshold=2048)
                 expected = tuple(torch.cat(parts) for parts in expected)
                 for output, target in zip(actual, expected):
                     torch.testing.assert_close(output, target, atol=2e-6, rtol=2e-4)

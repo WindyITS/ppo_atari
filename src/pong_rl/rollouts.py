@@ -90,9 +90,12 @@ class RallyCollector:
                 action, logp, _, value = self.agent.get_action_and_value(obs)
             actions, logps, values = action.cpu().tolist(), logp.cpu().tolist(), value.flatten().cpu().tolist()
             self.global_step += len(active)
+            results = (self.envs.step_active(active, actions)
+                       if hasattr(self.envs, "step_active") else
+                       [self.envs.envs[i].step(action) for i, action in zip(active, actions)])
             remaining = []
             for slot, i in enumerate(active):
-                next_obs, reward, term, trunc, info = self.envs.envs[i].step(actions[slot])
+                next_obs, reward, term, trunc, info = results[slot]
                 pending[i].append((self.observations[i].copy(), actions[slot], logps[slot], values[slot], float(reward)))
                 self.observations[i] = next_obs
                 point = reward != 0  # raw Pong reward: +1 or -1 for each point

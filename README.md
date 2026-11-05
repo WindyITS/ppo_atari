@@ -80,7 +80,8 @@ update therefore comes from the same frozen policy, and no unfinished rally is c
 The CNN shuffles observations into minibatches. Both recurrent agents (`lstm`, `attn_lstm`) replay each complete rally in order, starting
 from its saved memory; gradients cover the whole rally, with no fixed 128-step cutoff. Memory continues
 across points and updates and resets only when a game terminates or times out. Gradients stop between
-rallies. Activation checkpointing recomputes 32-step chunks to reduce accelerator memory use; those compute
+rallies. Replay retains activations for batches of up to 2048 padded steps. Larger batches use activation
+checkpointing to recompute 32-step chunks and reduce accelerator memory use; those compute
 chunks **do not detach memory or truncate gradients**. Very long rallies still take more time and memory.
 
 All architectures use four PPO epochs and up to four nonempty minibatches per epoch. Recurrent minibatches
@@ -120,7 +121,28 @@ Useful flags:
 - `--init-from PATH` (fine-tune from a checkpoint; see [Fine-tuning](#fine-tuning))
 - `--rallies-per-update 5` (default: five rallies per environment, or its game-ending remainder)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
+- `--parallel-envs` (one CPU process per game; preserves individual pauses and resets; uses more host memory)
+- `--replay-checkpoint-threshold 2048` (retain activations for small replay batches; `0` always recomputes to save memory)
 - `--report-window-steps 500000` (report episodes ending in the latest 500,000 aggregate environment steps)
+
+### Training performance
+
+Use `--parallel-envs` for a single GPU training job to collect games in separate CPU
+processes. Leave it off when running many simultaneous jobs unless CPU and RAM allow
+one worker per environment per job. Small recurrent replay batches retain activations;
+`--replay-checkpoint-threshold 0` restores always-on activation recomputation when memory
+is limited. Both paths preserve full-rally gradients and the same PPO optimizer groups.
+Training logs and W&B report collection and update times separately.
+
+Run a short benchmark without W&B, checkpoints, or changing existing runs:
+
+```bash
+uv run python scripts/benchmark_training.py --parallel-envs
+uv run python scripts/benchmark_training.py --replay-checkpoint-threshold 0
+```
+
+The first two iterations are excluded from benchmark summaries. Compare identical
+settings and avoid running other GPU workloads during measurements.
 
 ### Training reports
 
