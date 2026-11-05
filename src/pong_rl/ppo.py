@@ -8,31 +8,45 @@ from pong_rl.models import RecurrentAgent
 
 
 def replay_rally(agent, rally, device, checkpoint_steps=32):
-    """Full-rally BPTT with activation recomputation, NOT gradient truncation.
+    """Compatibility wrapper for a single complete rally."""
+    return replay_rallies(agent, [rally], device, checkpoint_steps)
 
-    Chunk boundaries pass h/c without detach. Only each rally's initial state is
-    detached, as in truncated BPTT, but no fixed-step boundary splits a rally.
-    Images stay on CPU until needed, including during backward recomputation.
+
+def replay_rallies(agent, rallies, device, checkpoint_steps=32):
+    """Replay padded rallies together; return only real steps in rally order.
+
+    Each lane starts with its own saved memory. Padding follows real steps and
+    contributes no loss. Chunk boundaries preserve the full recurrent gradient.
+    Images remain on CPU until their checkpoint chunk is needed.
     """
-    state = tuple(s.to(device) for s in rally.initial_state)
-    logps, entropies, values = [], [], []
+    lengths = [len(r) for r in rallies]
+    batch = len(rallies)
+    steps = max(lengths)
+    observations = torch.zeros((steps, batch, *rallies[0].observations.shape[1:]),
+                               dtype=rallies[0].observations.dtype)
+    actions = torch.zeros((steps, batch), dtype=torch.long)
+    for lane, rally in enumerate(rallies):
+        observations[:len(rally), lane] = rally.observations
+        actions[:len(rally), lane] = rally.actions
+    state = tuple(torch.cat([r.initial_state[i] for r in rallies], dim=1).to(device)
+                  for i in range(2))
+    outputs = [[], [], []]
 
-    def replay(observations, actions, h, c):
+    def replay(obs, act, h, c):
         _, logp, entropy, value, (h, c) = agent.get_action_and_value(
-            observations.to(device=device, dtype=torch.float32), (h, c),
-            torch.zeros(len(actions), device=device), actions.to(device))
+            obs.flatten(0, 1).to(device=device, dtype=torch.float32), (h, c),
+            torch.zeros(act.numel(), device=device), act.flatten().to(device))
         return logp, entropy, value.flatten(), h, c
 
-    for start in range(0, len(rally), checkpoint_steps):
-        end = start + checkpoint_steps
-        logp, entropy, value, h, c = checkpoint(
-            replay, rally.observations[start:end], rally.actions[start:end],
-            *state, use_reentrant=False)
-        state = h, c
-        logps.append(logp)
-        entropies.append(entropy)
-        values.append(value)
-    return torch.cat(logps), torch.cat(entropies), torch.cat(values)
+    for start in range(0, steps, checkpoint_steps):
+        result = checkpoint(replay, observations[start:start+checkpoint_steps],
+                            actions[start:start+checkpoint_steps], *state,
+                            use_reentrant=False)
+        state = result[3:]
+        for chunks, result_tensor in zip(outputs, result[:3]):
+            chunks.append(result_tensor.reshape(-1, batch))
+    valid = torch.arange(steps, device=device)[None, :] < torch.tensor(lengths, device=device)[:, None]
+    return tuple(torch.cat(chunks).transpose(0, 1)[valid] for chunks in outputs)
 
 
 def update_policy(agent, optimizer, batch, args, device):
@@ -55,7 +69,7 @@ def update_policy(agent, optimizer, batch, args, device):
     for _ in range(args.update_epochs):
         epoch_kl, epoch_samples = 0.0, 0
         if recurrent:
-            # Balance by real step counts; each rally stays intact and needs no padding.
+            # Balance real step counts while preserving complete rallies.
             order = np.random.permutation(len(rallies)).tolist()
             order.sort(key=lambda i: len(rallies[i]), reverse=True)
             groups = [[] for _ in range(min(args.num_minibatches, len(rallies)))]
@@ -74,13 +88,15 @@ def update_policy(agent, optimizer, batch, args, device):
         for group, size in zip(groups, sizes):
             optimizer.zero_grad()
             if recurrent:
-                units = [(slice(offsets[i], offsets[i+1]), i) for i in group]
+                indices = np.concatenate([np.arange(offsets[i], offsets[i+1]) for i in group])
+                units = [(indices, group)]
             else:
                 # Accumulate CNN microbatches too, to bound accelerator image/activation storage.
                 units = [(group[start:start+256], None) for start in range(0, size, 256)]
             for indices, rally_index in units:
                 if recurrent:
-                    newlogp, entropy, newvalue = replay_rally(agent, rallies[rally_index], device)
+                    newlogp, entropy, newvalue = replay_rallies(
+                        agent, [rallies[i] for i in rally_index], device)
                 else:
                     _, newlogp, entropy, newvalue = agent.get_action_and_value(
                         observations[indices].to(device=device, dtype=torch.float32), actions[indices].to(device))

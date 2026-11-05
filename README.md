@@ -84,7 +84,7 @@ rallies. Activation checkpointing recomputes 32-step chunks to reduce accelerato
 chunks **do not detach memory or truncate gradients**. Very long rallies still take more time and memory.
 
 All architectures use four PPO epochs and up to four nonempty minibatches per epoch. Recurrent minibatches
-group whole rallies by their lengths; CNN minibatches shuffle steps. Losses are weighted by actual step
+batch whole rallies together with padding masked out of the loss; CNN minibatches shuffle steps. Losses are weighted by actual step
 counts, and advantages are normalized over the actual collected batch. GAE continues across scoring points.
 True game termination has zero bootstrap value; a timeout uses the final observation and pre-reset memory.
 A timeout can end a partial rally, whose available transitions are included in the game-ending remainder.

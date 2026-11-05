@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from pong_rl.models import LSTMAgent, make_agent, zero_lstm_state
-from pong_rl.ppo import replay_rally, update_policy
+from pong_rl.ppo import replay_rallies, replay_rally, update_policy
 from pong_rl.rollouts import Rally, RallyCollector
 from pong_rl.train import Args
 
@@ -145,6 +145,39 @@ class RallyTrainingTests(unittest.TestCase):
         for (name, actual), expected in zip(agent.named_parameters(), reference.parameters()):
             with self.subTest(parameter=name):
                 torch.testing.assert_close(actual.grad, expected.grad, atol=2e-6, rtol=2e-4)
+
+    def test_batched_replay_matches_individual_outputs_and_full_gradients(self):
+        for arch in ("lstm", "attn_lstm"):
+            with self.subTest(arch=arch):
+                torch.manual_seed(11)
+                spaces = SimpleNamespace(
+                    single_observation_space=gym.spaces.Box(0, 255, (1,84,84), np.uint8),
+                    single_action_space=gym.spaces.Discrete(6))
+                agent = make_agent(arch, spaces)
+                reference = copy.deepcopy(agent)
+                rallies = []
+                expected = [[], [], []]
+                for length in (35, 7, 1):
+                    obs = torch.randint(0, 256, (length, 1, 84, 84), dtype=torch.uint8)
+                    actions = torch.arange(length) % 6
+                    zeros = torch.zeros(length)
+                    initial = tuple(torch.randn_like(s) for s in zero_lstm_state(1, torch.device("cpu")))
+                    rallies.append(Rally(obs, actions, zeros, zeros, zeros, zeros, initial))
+                    _, logp, entropy, value, _ = reference.get_action_and_value(
+                        obs.float(), initial, zeros, actions)
+                    for parts, output in zip(expected, (logp, entropy, value.flatten())):
+                        parts.append(output)
+                actual = replay_rallies(agent, rallies, torch.device("cpu"))
+                expected = tuple(torch.cat(parts) for parts in expected)
+                for output, target in zip(actual, expected):
+                    torch.testing.assert_close(output, target, atol=2e-6, rtol=2e-4)
+                # Last real step of every lane: excludes all padding, crosses chunk 32.
+                ends = torch.tensor([34, 41, 42])
+                sum(output[ends].sum() for output in actual).backward()
+                sum(output[ends].sum() for output in expected).backward()
+                for (name, parameter), target in zip(agent.named_parameters(), reference.parameters()):
+                    with self.subTest(parameter=name):
+                        torch.testing.assert_close(parameter.grad, target.grad, atol=4e-6, rtol=5e-4)
 
     def test_both_architectures_update_from_tiny_variable_batches(self):
         for arch in ("cnn", "lstm", "attn_lstm"):
