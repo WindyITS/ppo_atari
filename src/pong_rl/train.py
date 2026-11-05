@@ -2,6 +2,8 @@
 # https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
 # https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_atari_lstmpy
 import argparse
+import hashlib
+import io
 import json
 import os
 import random
@@ -27,7 +29,31 @@ gym.register_envs(ale_py)
 
 # Frames per observation: the CNN sees motion through stacking, the LSTM through its memory
 FRAME_STACK = {"cnn": 4, "lstm": 1}
-CHECKPOINT_STEPS = (0, 2_500_000, 5_000_000, 7_500_000, 10_000_000)
+# Milestones in aggregate environment steps. A from-scratch run saves its untrained weights at 0;
+# a fine-tuning run saves its starting (parent) weights and then every later milestone.
+CHECKPOINT_STEPS = (0, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 7_500_000, 10_000_000, 11_000_000, 12_000_000, 13_000_000, 14_000_000, 15_000_000)
+CONDITION_LABELS = {(False, False): "clean", (False, True): "mask", (True, False): "fog", (True, True): "fog_mask"}
+
+
+def condition_id(use_fog: bool, mask_enemy: bool) -> str:
+    """Machine-readable condition stored inside checkpoints and checked by pong-eval."""
+    return f"fog_{int(use_fog)}_mask_{int(mask_enemy)}"
+
+
+def condition_label(use_fog: bool, mask_enemy: bool) -> str:
+    """Human-readable condition used in folder names."""
+    return CONDITION_LABELS[(bool(use_fog), bool(mask_enemy))]
+
+
+def step_label(step: int) -> str:
+    """7_500_000 -> 07.5M, so names sort by step. Other step counts stay exact."""
+    if step % 100_000 == 0:
+        return f"{step // 1_000_000:02d}.{step % 1_000_000 // 100_000}M"
+    return str(step)
+
+
+def checkpoint_filename(step: int) -> str:
+    return f"step_{step_label(step)}.pt"
 
 
 @dataclass
@@ -42,13 +68,14 @@ class Args:
     capture_video: bool = False
     save_model: bool = True
     report_window_steps: int = 500_000
+    init_from: str | None = None
 
     # Algorithm specific arguments
     env_id: str = "ALE/Pong-v5"
     arch: str = "cnn"
     use_fog: bool = False
     mask_enemy: bool = False
-    total_timesteps: int = 10_000_000
+    total_timesteps: int = 15_000_000
     learning_rate: float = 2.5e-4
     num_envs: int = 8
     rallies_per_update: int = 5
@@ -79,7 +106,10 @@ def parse_args() -> Args:
     )
     parser.add_argument("--use-fog", action="store_true", help="Enable FogWrapper on agent half")
     parser.add_argument("--mask-enemy", action="store_true", help="Enable EnemyMaskWrapper on enemy paddle")
-    parser.add_argument("--total-timesteps", type=int, default=10_000_000)
+    parser.add_argument("--total-timesteps", type=int, default=15_000_000,
+                        help="target aggregate environment step; a fine-tune continues its parent's step count")
+    parser.add_argument("--init-from", type=str, default=None,
+                        help="checkpoint to fine-tune from (same --arch); fresh Adam, LR annealed over the fine-tune")
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--rallies-per-update", type=int, default=5,
                         help="complete rallies per env, flushed early when its game ends")
@@ -110,21 +140,50 @@ def parse_args() -> Args:
         capture_video=parsed.capture_video,
         save_model=parsed.save_model,
         report_window_steps=parsed.report_window_steps,
+        init_from=parsed.init_from,
     )
 
 
-def save_checkpoint(agent, args, tag, condition, global_step, updates, optimizer_steps,
-                    checkpoint_step=None):
-    """Save evaluation weights atomically; distinguish requested milestone from actual experience."""
-    suffix = "" if checkpoint_step is None else f"_step_{checkpoint_step}"
-    path = Path("checkpoints") / f"{tag}_seed_{args.seed}{suffix}.pt"
+def load_parent(path: str, arch: str) -> tuple[dict, dict]:
+    """Load a checkpoint to fine-tune from: (weights, metadata recorded in every child checkpoint)."""
+    data = Path(path).read_bytes()
+    checkpoint = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+    parent_args = checkpoint["args"]
+    parent_arch = checkpoint.get("arch", parent_args.get("arch", "cnn"))
+    if parent_arch != arch:
+        raise ValueError(f"--arch {arch} does not match the parent checkpoint's architecture ({parent_arch})")
+    if checkpoint.get("global_step") is None:
+        raise ValueError("parent checkpoint does not record its global_step")
+    metadata = {
+        "path": str(Path(path).resolve()),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "run": checkpoint.get("run"),
+        "condition": condition_id(parent_args["use_fog"], parent_args["mask_enemy"]),
+        "condition_label": condition_label(parent_args["use_fog"], parent_args["mask_enemy"]),
+        "seed": parent_args["seed"],
+        "global_step": int(checkpoint["global_step"]),
+        "checkpoint_step": checkpoint.get("checkpoint_step"),
+        "updates": checkpoint.get("updates"),
+    }
+    return checkpoint["model_state_dict"], metadata
+
+
+def save_checkpoint(agent, args, run, global_step, updates, optimizer_steps, checkpoint_step=None):
+    """Save evaluation weights atomically; distinguish requested milestone from actual experience.
+
+    checkpoint_step=None writes final.pt, the end-of-training model (also the run's completion marker).
+    """
+    name = "final.pt" if checkpoint_step is None else checkpoint_filename(checkpoint_step)
+    path = Path("checkpoints") / run["dir"] / name
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".checkpoint-", suffix=".tmp", delete=False) as stream:
             temporary = Path(stream.name)
             torch.save({"model_state_dict": agent.state_dict(), "args": vars(args),
-                        "arch": args.arch, "condition": condition, "seed": args.seed,
+                        "arch": args.arch, "condition": run["condition"], "seed": args.seed,
+                        "run": run["dir"], "kind": run["kind"], "start_step": run["start_step"],
+                        "init_from": run["init_from"], "steps_since_start": global_step - run["start_step"],
                         "global_step": global_step, "updates": updates,
                         "optimizer_steps": optimizer_steps, "checkpoint_step": checkpoint_step}, stream)
         os.replace(temporary, path)
@@ -145,19 +204,34 @@ def main():
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
 
-    condition = f"fog_{int(args.use_fog)}_mask_{int(args.mask_enemy)}"
-    tag = f"{args.arch}_{condition}"
-    run_name = f"pong__{tag}__seed_{args.seed}__{int(time.time())}"
-    episode_window = EpisodeWindow(args.report_window_steps)
-    os.makedirs("logs", exist_ok=True)
-    episode_log_path = os.path.join("logs", f"{run_name}_episodes.jsonl")
+    condition = condition_id(args.use_fog, args.mask_enemy)
+    label = condition_label(args.use_fog, args.mask_enemy)
+    parent_state, parent = load_parent(args.init_from, args.arch) if args.init_from else (None, None)
+    kind = "finetune" if parent else "scratch"
+    # A fine-tune continues its parent's step count, so both kinds share one step axis. Its starting
+    # weights are labelled by the parent's milestone (e.g. 10.0M), else by the parent's actual step.
+    start_step = parent["global_step"] if parent else 0
+    initial_checkpoint = parent["checkpoint_step"] if parent and parent["checkpoint_step"] is not None else start_step
+    # The folder names the parent checkpoint, so fine-tunes from different parents never share files.
+    run_label = f"{parent['condition_label']}_{step_label(initial_checkpoint)}_to_{label}" if parent else label
+    if start_step >= args.total_timesteps:
+        raise ValueError(f"--total-timesteps ({args.total_timesteps}) must exceed the starting step ({start_step})")
+    run = {"dir": f"{kind}/{args.arch}/{run_label}/seed_{args.seed}", "kind": kind,
+           "condition": condition, "start_step": start_step, "init_from": parent}
+    tag = f"{kind}_{args.arch}_{run_label}"
+    started = int(time.time())
+    run_name = f"{tag}__seed_{args.seed}__{started}"
+    episode_window = EpisodeWindow(args.report_window_steps, start_step)
+    log_dir = Path("logs") / run["dir"]
+    log_dir.mkdir(parents=True, exist_ok=True)
+    episode_log_path = log_dir / f"episodes_{started}.jsonl"
     print(f"Episode outcomes: {episode_log_path}")
 
     if args.track:
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            config=vars(args),
+            config={**vars(args), "kind": kind, "run": run["dir"], "start_step": start_step, "init_from": parent},
             group=tag,
             name=run_name,
             save_code=True,
@@ -199,13 +273,15 @@ def main():
     assert envs.single_observation_space.shape is not None
 
     agent = LSTMAgent(envs).to(device) if args.arch == "lstm" else Agent(envs).to(device)
+    if parent_state is not None:
+        agent.load_state_dict(parent_state, strict=True)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     def on_episode(episode):
         episode_window.add(episode)
         with open(episode_log_path, "a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"arch": args.arch, "seed": args.seed,
-                                     "condition": condition, **episode.to_dict()}, allow_nan=False) + "\n")
+            stream.write(json.dumps({"arch": args.arch, "seed": args.seed, "condition": condition,
+                                     "run": run["dir"], **episode.to_dict()}, allow_nan=False) + "\n")
         print(f"[{tag}|s{args.seed}] step={episode.global_step}, return={episode.episode_return}, "
               f"length={episode.episode_length}, outcome={episode.outcome}, "
               f"terminated={int(episode.terminated)}, truncated={int(episode.truncated)}")
@@ -218,21 +294,23 @@ def main():
 
     start_time = time.time()
     iteration = 0
-    global_step = 0
+    global_step = start_step
     optimizer_steps = 0
-    pending_checkpoints = iter(step for step in CHECKPOINT_STEPS if 0 < step <= args.total_timesteps)
+    pending_checkpoints = iter(step for step in CHECKPOINT_STEPS
+                               if initial_checkpoint < step <= args.total_timesteps)
     next_checkpoint = next(pending_checkpoints, None)
     try:
         if args.save_model:
-            # Save the random initial weights before collecting experience or updating.
-            save_checkpoint(agent, args, tag, condition, 0, 0, 0, checkpoint_step=0)
-        collector = RallyCollector(envs, agent, device, args.seed, args.rallies_per_update)
+            # Save the starting weights (random, or the parent's) before collecting experience or updating.
+            save_checkpoint(agent, args, run, start_step, 0, 0, checkpoint_step=initial_checkpoint)
+        collector = RallyCollector(envs, agent, device, args.seed, args.rallies_per_update, start_step)
         # Finish the last batch at natural boundaries; actual steps may exceed the target.
         while collector.global_step < args.total_timesteps:
             iteration += 1
             if args.anneal_lr:
+                # Anneal over this run's own steps, so a fine-tune restarts from the base learning rate.
                 optimizer.param_groups[0]["lr"] = args.learning_rate * max(
-                    0.0, 1.0 - collector.global_step / args.total_timesteps)
+                    0.0, 1.0 - (collector.global_step - start_step) / (args.total_timesteps - start_step))
             batch = collector.collect(args.gamma, args.gae_lambda, on_episode)
             global_step = batch.global_step
             losses = update_policy(agent, optimizer, batch, args, device)
@@ -241,10 +319,10 @@ def main():
             # long batch may cross multiple milestones; none should be skipped.
             while next_checkpoint is not None and global_step >= next_checkpoint:
                 if args.save_model:
-                    save_checkpoint(agent, args, tag, condition, global_step, iteration,
+                    save_checkpoint(agent, args, run, global_step, iteration,
                                     optimizer_steps, checkpoint_step=next_checkpoint)
                 next_checkpoint = next(pending_checkpoints, None)
-            sps = int(global_step / (time.time() - start_time))
+            sps = int((global_step - start_step) / (time.time() - start_time))
             window_metrics = episode_window.metrics(global_step)
             print(f"[{tag}|s{args.seed}] update={iteration}, step={global_step}/{args.total_timesteps}, "
                   f"batch_steps={batch.steps}, rallies={batch.completed_rallies}, "
@@ -253,6 +331,7 @@ def main():
                 wandb.log({**losses,
                            "charts/learning_rate": optimizer.param_groups[0]["lr"],
                            "charts/SPS": sps, "global_step": global_step,
+                           "charts/steps_since_start": global_step - start_step,
                            "charts/updates": iteration, "charts/optimizer_steps": optimizer_steps,
                            "charts/batch/steps": batch.steps,
                            "charts/batch/completed_rallies": batch.completed_rallies,
@@ -265,7 +344,7 @@ def main():
         envs.close()
 
     if args.save_model:
-        save_checkpoint(agent, args, tag, condition, global_step, iteration, optimizer_steps)
+        save_checkpoint(agent, args, run, global_step, iteration, optimizer_steps)
 
     if args.track:
         wandb.finish()

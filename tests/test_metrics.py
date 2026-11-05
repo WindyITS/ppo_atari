@@ -53,6 +53,18 @@ class ReportingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             window.add(Episode(19, 1, 5, True, False))
 
+    def test_window_never_reaches_before_a_finetune_start(self):
+        window = EpisodeWindow(100, start_step=1_000)
+        window.add(Episode(1_040, 1, 40, True, False))
+        early = window.metrics(1_050)
+        self.assertEqual((early["start_step_exclusive"], early["observed_window_steps"]), (1_000, 50))
+        self.assertFalse(early["full_window"])
+        late = window.metrics(1_100)
+        self.assertTrue(late["full_window"])
+        self.assertEqual(late["episodes"], 1)
+        with self.assertRaises(ValueError):
+            EpisodeWindow(100, start_step=1_000).metrics(999)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,7 +56,7 @@ class TrainingReportingTests(unittest.TestCase):
                           patch("pong_rl.train.wandb") as tracker,
                           contextlib.redirect_stdout(io.StringIO())):
                         main()
-                    records = [json.loads(line) for line in next(Path("logs").glob("*_episodes.jsonl")).read_text().splitlines()]
+                    records = [json.loads(line) for line in next(Path("logs", "scratch", arch, "clean", "seed_1").glob("episodes_*.jsonl")).read_text().splitlines()]
                     self.assertEqual(len(records), 512)
                     self.assertEqual(sum(row["outcome"] == "timeout" for row in records), 256)
                     self.assertEqual(sum(row["outcome"] == "win" for row in records), 256)

@@ -55,16 +55,19 @@ def summarize_episodes(episodes) -> dict:
 
 
 class EpisodeWindow:
-    """Episodes ending in (max(0, step - window_steps), step], in aggregate env steps.
+    """Episodes ending in (max(start_step, step - window_steps), step], in aggregate env steps.
+
+    start_step is the run's first step (nonzero for fine-tuning), so no window reaches before it.
 
     These are training observations, potentially produced by different policy versions.
     Ongoing episodes are censored: counts and lengths must accompany the averages.
     """
 
-    def __init__(self, window_steps: int):
-        if window_steps <= 0:
-            raise ValueError("window_steps must be positive")
+    def __init__(self, window_steps: int, start_step: int = 0):
+        if window_steps <= 0 or start_step < 0:
+            raise ValueError("window_steps must be positive and start_step nonnegative")
         self.window_steps = window_steps
+        self.start_step = start_step
         self.episodes: deque[Episode] = deque()
         self._last_added_step = -1
         self._last_reported_step = -1
@@ -76,16 +79,16 @@ class EpisodeWindow:
         self.episodes.append(episode)
 
     def metrics(self, global_step: int) -> dict:
-        if global_step < max(self._last_added_step, self._last_reported_step) or global_step < 0:
-            raise ValueError("report step must not precede recorded episodes")
+        if global_step < max(self._last_added_step, self._last_reported_step, self.start_step):
+            raise ValueError("report step must not precede recorded episodes or the run's start")
         self._last_reported_step = global_step
-        start = max(0, global_step - self.window_steps)
+        start = max(self.start_step, global_step - self.window_steps)
         while self.episodes and self.episodes[0].global_step <= start:
             self.episodes.popleft()
         return {
             "start_step_exclusive": start,
             "end_step_inclusive": global_step,
             "observed_window_steps": global_step - start,
-            "full_window": global_step >= self.window_steps,
+            "full_window": global_step - self.start_step >= self.window_steps,
             **summarize_episodes(self.episodes),
         }

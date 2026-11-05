@@ -57,14 +57,14 @@ class RallyCollector:
     used after initialization. Every batch is collected with a single frozen policy.
     """
 
-    def __init__(self, envs, agent, device, seed, rallies_per_update=5):
+    def __init__(self, envs, agent, device, seed, rallies_per_update=5, start_step=0):
         if rallies_per_update <= 0:
             raise ValueError("rallies_per_update must be positive")
         self.envs, self.agent, self.device = envs, agent, device
         self.quota = rallies_per_update
         self.observations = list(envs.reset(seed=seed)[0])
         self.state = zero_lstm_state(len(envs.envs), device)
-        self.global_step = 0
+        self.global_step = start_step  # nonzero when fine-tuning continues a parent's step count
 
     @torch.no_grad()
     def collect(self, gamma: float, gae_lambda: float,

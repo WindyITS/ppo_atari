@@ -1,57 +1,120 @@
 #!/usr/bin/env bash
-# Train all 4 conditions (fog off/on x enemy mask off/on) across each seed in SEEDS (default 2 = 8 runs).
+# Two-stage sweep (needs bash >= 4.3 for `wait -n`).
+#   Stage 1, scratch:  every architecture x condition x seed, trained from scratch to TIMESTEPS.
+#   Stage 2, finetune: each completed clean scratch run's 10M checkpoint, fine-tuned on mask, fog and
+#                      fog_mask up to the same TIMESTEPS (the step count continues from the parent).
 # Usage:
-#   bash run_all.sh                 # default: CNN, runs up to 8 jobs in parallel
-#   ARCH=lstm bash run_all.sh       # CNN + LSTM (1 frame per step) instead of the frame-stacked CNN
-#   MAX_PARALLEL=4 bash run_all.sh  # limit to 4 simultaneous jobs
+#   bash run_all.sh                           # both stages; ARCHS="cnn lstm", SEEDS="1 2 3"
+#   STAGES=scratch bash run_all.sh            # only stage 1 (or STAGES=finetune)
+#   ARCHS=lstm SEEDS="1" bash run_all.sh      # a subset
+#   MAX_PARALLEL=6 bash run_all.sh            # at most 6 simultaneous jobs (default 8)
+# Runs whose final.pt already exists are skipped, so rerunning the script resumes an interrupted sweep.
+# An unfinished run's folders are moved to <folder>.aborted_<time> before it is restarted.
+# Layout: checkpoints/<stage>/<arch>/<condition>/seed_<n>/ and the same folders under logs/,
+#         where a fine-tune's condition names its parent, e.g. finetune/lstm/clean_10.0M_to_fog/seed_1.
 
 set -euo pipefail
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-ARCH="${ARCH:-cnn}"
+read -r -a ARCHS <<< "${ARCHS:-cnn lstm}"
+read -r -a SEEDS <<< "${SEEDS:-1 2 3}"
+read -r -a STAGES <<< "${STAGES:-scratch finetune}"
 MAX_PARALLEL="${MAX_PARALLEL:-8}"
-TIMESTEPS="${TIMESTEPS:-10000000}"
-SEEDS=(1 2)
-CONDITIONS=4  # fog off/on x enemy mask off/on
-TOTAL_RUNS=$(( ${#SEEDS[@]} * CONDITIONS ))
+TIMESTEPS="${TIMESTEPS:-15000000}"
+PARENT_CHECKPOINT="${PARENT_CHECKPOINT:-step_10.0M.pt}"
+PARENT_LABEL="${PARENT_CHECKPOINT#step_}"
+PARENT_LABEL="${PARENT_LABEL%.pt}"
 
-mkdir -p logs checkpoints
+for stage in "${STAGES[@]}"; do
+  if [[ "${stage}" != scratch && "${stage}" != finetune ]]; then
+    echo "Unknown stage '${stage}' (use scratch and/or finetune)" >&2
+    exit 2
+  fi
+done
+
+CONDITIONS=(clean mask fog fog_mask)
+declare -A FLAGS=([clean]="" [mask]="--mask-enemy" [fog]="--use-fog" [fog_mask]="--use-fog --mask-enemy")
 
 running=0
+launched=0
+skipped=0
 failed=0
-for seed in "${SEEDS[@]}"; do
-  for fog_flag in "" "--use-fog"; do
-    for mask_flag in "" "--mask-enemy"; do
-      fog_id=0; [[ -n "$fog_flag" ]] && fog_id=1
-      mask_id=0; [[ -n "$mask_flag" ]] && mask_id=1
-      tag="${ARCH}_fog_${fog_id}_mask_${mask_id}_seed_${seed}"
 
-      echo "Launching ${tag} ..."
-      uv run pong-rl \
-        --arch "${ARCH}" \
-        --seed "${seed}" \
-        --total-timesteps "${TIMESTEPS}" \
-        ${fog_flag} ${mask_flag} \
-        > "logs/${tag}.log" 2>&1 &
-
-      running=$((running + 1))
-      if (( running >= MAX_PARALLEL )); then
-        wait -n || failed=$((failed + 1))
-        running=$((running - 1))
-      fi
-    done
+# launch <run folder> <pong-rl arguments...>
+launch() {
+  local run="$1"
+  shift
+  if [[ -f "checkpoints/${run}/final.pt" ]]; then
+    echo "Skipping ${run} (final.pt exists)"
+    skipped=$((skipped + 1))
+    return
+  fi
+  local folder
+  for folder in "checkpoints/${run}" "logs/${run}"; do
+    if [[ -e "${folder}" ]]; then
+      mv "${folder}" "${folder}.aborted_$(date +%Y%m%d_%H%M%S)"
+      echo "Moved unfinished ${folder} aside"
+    fi
   done
+  mkdir -p "logs/${run}"
+  echo "Launching ${run} ..."
+  uv run pong-rl "$@" --total-timesteps "${TIMESTEPS}" > "logs/${run}/train.log" 2>&1 &
+  running=$((running + 1))
+  launched=$((launched + 1))
+  if (( running >= MAX_PARALLEL )); then
+    wait -n || failed=$((failed + 1))
+    running=$((running - 1))
+  fi
+}
+
+finish_stage() {
+  while (( running > 0 )); do
+    wait -n || failed=$((failed + 1))
+    running=$((running - 1))
+  done
+}
+
+for stage in "${STAGES[@]}"; do
+  case "${stage}" in
+    scratch)
+      for seed in "${SEEDS[@]}"; do
+        for arch in "${ARCHS[@]}"; do
+          for condition in "${CONDITIONS[@]}"; do
+            # shellcheck disable=SC2086  # FLAGS values are intentionally split into separate flags
+            launch "scratch/${arch}/${condition}/seed_${seed}" --arch "${arch}" --seed "${seed}" ${FLAGS[${condition}]}
+          done
+        done
+      done
+      ;;
+    finetune)
+      for seed in "${SEEDS[@]}"; do
+        for arch in "${ARCHS[@]}"; do
+          parent_dir="checkpoints/scratch/${arch}/clean/seed_${seed}"
+          parent="${parent_dir}/${PARENT_CHECKPOINT}"
+          for condition in mask fog fog_mask; do
+            run="finetune/${arch}/clean_${PARENT_LABEL}_to_${condition}/seed_${seed}"
+            # Only fine-tune from a finished parent, whose checkpoints can no longer be rewritten.
+            if [[ ! -f "checkpoints/${run}/final.pt" && ! ( -f "${parent}" && -f "${parent_dir}/final.pt" ) ]]; then
+              echo "Cannot launch ${run}: parent ${parent} is missing or its run is unfinished"
+              failed=$((failed + 1))
+              continue
+            fi
+            # shellcheck disable=SC2086
+            launch "${run}" --arch "${arch}" --seed "${seed}" --init-from "${parent}" ${FLAGS[${condition}]}
+          done
+        done
+      done
+      ;;
+  esac
+  # Fine-tuning needs the clean scratch checkpoints, so each stage finishes before the next starts.
+  finish_stage
 done
 
-while (( running > 0 )); do
-  wait -n || failed=$((failed + 1))
-  running=$((running - 1))
-done
-
+echo "Launched ${launched}, skipped ${skipped} completed, failed ${failed}."
 if (( failed > 0 )); then
-  echo "${failed} of ${TOTAL_RUNS} runs failed. Check ./logs/ for details."
+  echo "Check the train.log files under ./logs/ for details."
   exit 1
 fi
-echo "All ${TOTAL_RUNS} runs completed! Checkpoints saved in ./checkpoints/"
+echo "All runs completed! Checkpoints saved in ./checkpoints/"

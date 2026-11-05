@@ -20,7 +20,7 @@ Course project investigating whether a pixel-based PPO agent in Atari Pong (`ALE
 │   ├── ppo.py              # Variable-size PPO batches and full-rally recurrent replay
 │   └── wrappers.py         # Custom `FogWrapper` (agent half) and `EnemyMaskWrapper` (enemy paddle)
 ├── pyproject.toml          # Project dependencies (managed with `uv`)
-└── run_all.sh              # Launches all 4 conditions x 2 seeds (8 runs) per architecture
+└── run_all.sh              # Two-stage sweep: from scratch, then fine-tuning from the clean runs
 ```
 
 ## Setup
@@ -89,14 +89,16 @@ uv run pong-rl --use-fog --mask-enemy --seed 1
 Add `--arch lstm` to any of the commands above to train the CNN + LSTM agent instead.
 
 Useful flags:
-- `--total-timesteps 10000000` (default: `10_000_000`, matching the last checkpoint milestone)
+- `--total-timesteps 15000000` (default: `15_000_000`, matching the last checkpoint milestone)
+- `--init-from PATH` (fine-tune from a checkpoint; see [Fine-tuning](#fine-tuning))
 - `--rallies-per-update 5` (default: five rallies per environment, or its game-ending remainder)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
 - `--report-window-steps 500000` (report episodes ending in the latest 500,000 aggregate environment steps)
 
 ### Training reports
 
-`charts/window/*` uses the interval `(max(0, global_step - report_window_steps), global_step]`.
+`charts/window/*` uses the interval `(max(start, global_step - report_window_steps), global_step]`,
+where `start` is 0 from scratch and the parent's step when fine-tuning.
 An episode belongs to a window according to its **end step**; its return and length cover the whole
 episode, including any part before that window. The window reports its bounds, warm-up coverage,
 episode count, mean return, mean episode length, completed games, wins, losses, draws, and timeouts.
@@ -108,8 +110,8 @@ timeouts. When no games completed, that rate is undefined. `positive_return_frac
 positive-return episode, including timeouts, and is explicitly **not** a win rate. If both termination
 and truncation flags are true, genuine game termination takes precedence.
 
-Every episode is also written to `logs/{run_name}_episodes.jsonl`, with its exact end flags, outcome,
-return, length, training seed and condition. Raw W&B `charts/episodic_return` remains available;
+Every episode is also written to `logs/<run folder>/episodes_<start time>.jsonl` (same folders as the
+checkpoints below), with its exact end flags, outcome, return, length, training seed and condition. Raw W&B `charts/episodic_return` remains available;
 it describes a changing training policy, not a frozen-model evaluation.
 
 These logging changes apply to newly started processes. Existing training jobs keep their loaded
@@ -118,30 +120,62 @@ those outcomes solely from an episode's length.
 
 ### Checkpoints during training
 
-Both architectures save initial, untrained weights at **0 steps**, then milestone snapshots at
-**2.5M, 5M, 7.5M and 10M aggregate environment steps**. Milestones beyond `--total-timesteps` are
-not requested. Each snapshot is saved after the first complete-rally PPO update that reaches or
-passes its milestone, preserving the five-rally collection rule. Therefore its actual step count
-can be above the filename's milestone. If one batch crosses multiple milestones, those
-files contain the same updated weights and actual step count.
+Snapshots are taken at **0, 1M, 2M, 3M, 4M, 5M, 7.5M, 10M, 11M, 12M, 13M, 14M and 15M aggregate
+environment steps**; milestones beyond `--total-timesteps` are not requested. A from-scratch run saves its untrained
+weights at 0. Each snapshot is saved after the first complete-rally PPO update that reaches or passes
+its milestone, preserving the five-rally collection rule, so its actual step count can be above the
+filename's milestone. If one batch crosses multiple milestones, those files hold the same weights.
 
-For example: `checkpoints/lstm_fog_1_mask_1_seed_1_step_2500000.pt`.
-Each file records `checkpoint_step` (requested milestone), `global_step` (actual experience),
-`updates`, and `optimizer_steps`; evaluation reports expose the milestone and actual training steps.
-The existing filename without `_step_...` is still saved at the end of training as the final model.
-With the default 10M budget, the 10M snapshot and the final model hold the same weights.
-Snapshots are written atomically and uploaded to W&B when tracking is enabled. `--no-save-model`
-disables both milestone and final saves. All these files work with `pong-eval`.
+Each run has its own folder, `checkpoints/<scratch|finetune>/<arch>/<condition>/seed_<n>/`, where the
+condition is `clean`, `mask`, `fog` or `fog_mask`. A fine-tune's folder also names its parent
+checkpoint, e.g. `clean_10.0M_to_fog`, so fine-tunes from different parents never share files:
+
+```text
+checkpoints/
+├── scratch/lstm/fog_mask/seed_1/
+│   ├── step_00.0M.pt  step_01.0M.pt  ...  step_10.0M.pt  ...  step_15.0M.pt
+│   └── final.pt
+└── finetune/lstm/clean_10.0M_to_fog_mask/seed_1/
+    ├── step_10.0M.pt   # the parent's weights, before fine-tuning
+    ├── step_11.0M.pt  ...  step_15.0M.pt
+    └── final.pt
+```
+
+Each file records `checkpoint_step` (requested milestone), `global_step` (actual experience), `updates`,
+`optimizer_steps`, `run`, `kind`, `start_step` and `steps_since_start` (experience gathered by this run
+itself), and for fine-tunes `init_from` (parent path, hash, condition and step). In a fine-tune, `updates`
+and `optimizer_steps` count from its own start while `global_step` continues from the parent. Its first
+file (`step_10.0M.pt`, `steps_since_start = 0`) holds the parent's weights but records the fine-tune's
+condition, so evaluating it is a zero-shot test of the clean model on that condition; filter on
+`kind` and `steps_since_start` when grouping checkpoints by condition. `final.pt` is the end-of-training model; with a budget that ends on a milestone it
+holds the same weights as the last snapshot, and it marks the run as complete. Snapshots are written
+atomically and uploaded to W&B when tracking is enabled. `--no-save-model` disables all saves.
+All these files work with `pong-eval`.
+
+### Fine-tuning
+
+```bash
+uv run pong-rl --arch lstm --use-fog --mask-enemy --seed 1 \
+  --init-from checkpoints/scratch/lstm/clean/seed_1/step_10.0M.pt
+```
+
+Fine-tuning loads all weights from a checkpoint of the same architecture and trains on the new
+condition with a fresh Adam optimizer, using the same hyperparameters as training from scratch. The
+step count continues from the parent (about 10M to 15M), so fine-tuned and from-scratch runs share one
+step axis and the same total experience at 15M. W&B also logs `charts/steps_since_start`, the
+experience gathered under the new condition, and SPS counts only this run's own steps. The learning rate restarts at its base value and
+anneals to zero over the fine-tune's own steps. Note that a 10M snapshot from a 15M run was taken
+while its learning rate was still decaying, unlike a model trained with a 10M budget.
 
 ### Evaluate saved models
 
 ```bash
-# Evaluate every completed checkpoint with the same 20 environment seeds and sampling policy:
-uv run pong-eval checkpoints/*.pt --episodes 20 --seed 10000 \
+# Evaluate every final model (scratch and fine-tuned) with the same 20 seeds and sampling policy:
+uv run pong-eval checkpoints/*/*/*/seed_*/final.pt --episodes 20 --seed 10000 \
   --policy stochastic --device cpu --output evaluations/full_sweep.json
 
 # Optional alternative protocol: always choose the most probable action.
-uv run pong-eval checkpoints/cnn_fog_1_mask_1_seed_1.pt --policy greedy
+uv run pong-eval checkpoints/scratch/cnn/fog_mask/seed_1/final.pt --policy greedy
 ```
 
 Evaluation freezes the weights (`eval` and inference mode), restores each checkpoint's architecture
@@ -161,19 +195,24 @@ without using its GPU, though it still consumes CPU resources.
 The checkpoint evaluator also works with the current sweep's existing saved models; no training
 restart or change to the optimizer, learning-rate schedule, or training time limit is required.
 
-### Full Experiment Sweep (4 conditions × 2 seeds = 8 runs per architecture)
+### Full Experiment Sweep
 
-The default seeds are 1 and 2. Running both architectures covers 8 cases and 16 training runs in total.
+`run_all.sh` runs two stages (bash 4.3 or newer):
+
+1. **scratch**: every architecture × condition (`clean`, `mask`, `fog`, `fog_mask`) × seed, to 15M steps.
+2. **finetune**: each finished clean scratch run's `step_10.0M.pt`, fine-tuned on `mask`, `fog` and
+   `fog_mask` to 15M (another parent milestone: `PARENT_CHECKPOINT=step_05.0M.pt`).
+
+Defaults: `ARCHS="cnn lstm"`, `SEEDS="1 2 3"`, 8 parallel jobs, i.e. 24 scratch and 18 fine-tuning runs.
+Fine-tuning starts after every scratch run has finished, and only from parents whose run completed.
+Runs whose `final.pt` exists are skipped, so rerunning the script resumes an interrupted sweep; an
+unfinished run's checkpoint and log folders are first moved aside to `<folder>.aborted_<time>`.
 
 ```bash
-# Runs all 8 jobs in parallel by default:
-bash run_all.sh
-
-# Limit to 4 simultaneous jobs:
-MAX_PARALLEL=4 bash run_all.sh
-
-# Same sweep with the CNN + LSTM agent:
-ARCH=lstm bash run_all.sh
+bash run_all.sh                        # both stages
+STAGES=scratch bash run_all.sh         # only stage 1 (or STAGES=finetune)
+ARCHS=lstm SEEDS="1" bash run_all.sh   # a subset
+MAX_PARALLEL=6 bash run_all.sh         # at most 6 simultaneous jobs
 ```
 
-Trained checkpoints are saved to `checkpoints/{cnn|lstm}_fog_{0|1}_mask_{0|1}_seed_{1|2}.pt` and logs to `logs/`.
+Each run's console output goes to `logs/<run folder>/train.log`, next to its episode log.

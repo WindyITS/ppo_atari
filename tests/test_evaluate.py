@@ -52,8 +52,8 @@ class EvaluationTests(unittest.TestCase):
         config = dict(arch=arch, env_id="ALE/Pong-v5", use_fog=True, mask_enemy=True,
                       seed=1, total_timesteps=10_000_000)
         torch.save(dict(arch=arch, args=config, condition="fog_1_mask_1",
-                        model_state_dict=model.state_dict(), checkpoint_step=2_500_000,
-                        global_step=2_500_128, updates=200), path)
+                        model_state_dict=model.state_dict(), checkpoint_step=5_000_000,
+                        global_step=5_000_128, updates=200), path)
         env.close()
 
     def test_both_architectures_use_saved_masks_and_reproducible_action_rng(self):
@@ -79,8 +79,8 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual(result["summary"]["timeouts"], 2)
                 self.assertEqual(result["summary"]["positive_timeouts"], 2)
                 self.assertEqual(result["summary"]["completed_win_rate"], 1)
-                self.assertEqual(result["checkpoint_step"], 2_500_000)
-                self.assertEqual(result["training_global_step"], 2_500_128)
+                self.assertEqual(result["checkpoint_step"], 5_000_000)
+                self.assertEqual(result["training_global_step"], 5_000_128)
                 self.assertEqual(result["training_updates"], 200)
                 self.assertEqual([row["env_seed"] for row in result["episodes"]], [10000,10001,10002,10003])
 
