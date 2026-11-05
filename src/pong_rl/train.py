@@ -5,8 +5,10 @@ import argparse
 import json
 import os
 import random
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import ale_py
 import gymnasium as gym
@@ -25,6 +27,7 @@ gym.register_envs(ale_py)
 
 # Frames per observation: the CNN sees motion through stacking, the LSTM through its memory
 FRAME_STACK = {"cnn": 4, "lstm": 1}
+CHECKPOINT_STEPS = (0, 2_500_000, 5_000_000, 7_500_000, 10_000_000)
 
 
 @dataclass
@@ -108,6 +111,29 @@ def parse_args() -> Args:
         save_model=parsed.save_model,
         report_window_steps=parsed.report_window_steps,
     )
+
+
+def save_checkpoint(agent, args, tag, condition, global_step, updates, optimizer_steps,
+                    checkpoint_step=None):
+    """Save evaluation weights atomically; distinguish requested milestone from actual experience."""
+    suffix = "" if checkpoint_step is None else f"_step_{checkpoint_step}"
+    path = Path("checkpoints") / f"{tag}_seed_{args.seed}{suffix}.pt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".checkpoint-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            torch.save({"model_state_dict": agent.state_dict(), "args": vars(args),
+                        "arch": args.arch, "condition": condition, "seed": args.seed,
+                        "global_step": global_step, "updates": updates,
+                        "optimizer_steps": optimizer_steps, "checkpoint_step": checkpoint_step}, stream)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print(f"Saved model checkpoint to {path} (actual step={global_step}, milestone={checkpoint_step})")
+    if args.track:
+        wandb.save(str(path), policy="now")
 
 
 def main():
@@ -194,8 +220,12 @@ def main():
     iteration = 0
     global_step = 0
     optimizer_steps = 0
-    os.makedirs("checkpoints", exist_ok=True)
+    pending_checkpoints = iter(step for step in CHECKPOINT_STEPS if 0 < step <= args.total_timesteps)
+    next_checkpoint = next(pending_checkpoints, None)
     try:
+        if args.save_model:
+            # Save the random initial weights before collecting experience or updating.
+            save_checkpoint(agent, args, tag, condition, 0, 0, 0, checkpoint_step=0)
         collector = RallyCollector(envs, agent, device, args.seed, args.rallies_per_update)
         # Finish the last batch at natural boundaries; actual steps may exceed the target.
         while collector.global_step < args.total_timesteps:
@@ -207,6 +237,13 @@ def main():
             global_step = batch.global_step
             losses = update_policy(agent, optimizer, batch, args, device)
             optimizer_steps += losses.pop("charts/optimizer_steps")
+            # Save the first completed policy update at/after each milestone. A
+            # long batch may cross multiple milestones; none should be skipped.
+            while next_checkpoint is not None and global_step >= next_checkpoint:
+                if args.save_model:
+                    save_checkpoint(agent, args, tag, condition, global_step, iteration,
+                                    optimizer_steps, checkpoint_step=next_checkpoint)
+                next_checkpoint = next(pending_checkpoints, None)
             sps = int(global_step / (time.time() - start_time))
             window_metrics = episode_window.metrics(global_step)
             print(f"[{tag}|s{args.seed}] update={iteration}, step={global_step}/{args.total_timesteps}, "
@@ -228,23 +265,7 @@ def main():
         envs.close()
 
     if args.save_model:
-        ckpt_path = f"checkpoints/{tag}_seed_{args.seed}.pt"
-        torch.save(
-            {
-                "model_state_dict": agent.state_dict(),
-                "args": vars(args),
-                "arch": args.arch,
-                "condition": condition,
-                "seed": args.seed,
-                "global_step": global_step,
-                "updates": iteration,
-                "optimizer_steps": optimizer_steps,
-            },
-            ckpt_path,
-        )
-        print(f"Saved model checkpoint to {ckpt_path}")
-        if args.track:
-            wandb.save(ckpt_path)
+        save_checkpoint(agent, args, tag, condition, global_step, iteration, optimizer_steps)
 
     if args.track:
         wandb.finish()

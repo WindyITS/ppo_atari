@@ -110,6 +110,22 @@ These logging changes apply to newly started processes. Existing training jobs k
 code. Historical return/length logs cannot reliably recover true wins versus timeouts; do not infer
 those outcomes solely from an episode's length.
 
+### Checkpoints during training
+
+Both architectures save initial, untrained weights at **0 steps**, then milestone snapshots at
+**2.5M, 5M, 7.5M and 10M aggregate environment steps**. Milestones beyond `--total-timesteps` are
+not requested. Each snapshot is saved after the first complete-rally PPO update that reaches or
+passes its milestone, preserving the five-rally collection rule. Therefore its actual step count
+can be above the filename's milestone. If one batch crosses multiple milestones, those
+files contain the same updated weights and actual step count.
+
+For example: `checkpoints/lstm_fog_1_mask_1_seed_1_step_2500000.pt`.
+Each file records `checkpoint_step` (requested milestone), `global_step` (actual experience),
+`updates`, and `optimizer_steps`; evaluation reports expose the milestone and actual training steps.
+The existing filename without `_step_...` is still saved at the end of training as the final model.
+Snapshots are written atomically and uploaded to W&B when tracking is enabled. `--no-save-model`
+disables both milestone and final saves. All these files work with `pong-eval`.
+
 ### Evaluate saved models
 
 ```bash
