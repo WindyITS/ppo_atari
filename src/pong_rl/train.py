@@ -76,10 +76,11 @@ class Args:
     use_fog: bool = False
     mask_enemy: bool = False
     total_timesteps: int = 15_000_000
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 0.001
     num_envs: int = 8
     rallies_per_update: int = 5
-    rollout_scheme: str = "complete_rallies"
+    max_rally_steps: int = 512
+    rollout_scheme: str = "capped_rallies"
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -88,7 +89,7 @@ class Args:
     norm_adv: bool = True
     clip_coef: float = 0.1
     clip_vloss: bool = True
-    ent_coef: float = 0.01
+    ent_coef: float = 0.02
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: float | None = None
@@ -113,6 +114,11 @@ def parse_args() -> Args:
                         help="target aggregate environment step; a fine-tune continues its parent's step count")
     parser.add_argument("--init-from", type=str, default=None,
                         help="checkpoint to fine-tune from (same --arch); fresh Adam, LR annealed over the fine-tune")
+    parser.add_argument("--learning-rate", type=float, default=0.001,
+                        help="initial Adam learning rate, annealed over the run")
+    parser.add_argument("--ent-coef", type=float, default=0.02, help="PPO entropy bonus coefficient")
+    parser.add_argument("--max-rally-steps", type=int, default=512,
+                        help="pause a lane after this many steps without a point; resume next update")
     parser.add_argument("--parallel-envs", action="store_true",
                         help="collect active Pong lanes in separate CPU processes")
     parser.add_argument("--num-envs", type=int, default=8)
@@ -128,16 +134,23 @@ def parse_args() -> Args:
     parser.add_argument("--report-window-steps", type=int, default=500_000,
                         help="aggregate environment-step window for episodes ending in (step-window, step]")
     parsed = parser.parse_args()
-    for name in ("report_window_steps", "rallies_per_update", "num_envs", "total_timesteps"):
+    for name in ("report_window_steps", "rallies_per_update", "num_envs", "total_timesteps", "max_rally_steps"):
         if getattr(parsed, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
 
+    if not np.isfinite(parsed.learning_rate) or parsed.learning_rate <= 0:
+        parser.error("--learning-rate must be finite and positive")
+    if not np.isfinite(parsed.ent_coef) or parsed.ent_coef < 0:
+        parser.error("--ent-coef must be finite and nonnegative")
     if parsed.replay_checkpoint_threshold < 0:
         parser.error("--replay-checkpoint-threshold must be nonnegative")
 
     return Args(
         exp_name=parsed.exp_name,
         seed=parsed.seed,
+        learning_rate=parsed.learning_rate,
+        ent_coef=parsed.ent_coef,
+        max_rally_steps=parsed.max_rally_steps,
         replay_checkpoint_threshold=parsed.replay_checkpoint_threshold,
         parallel_envs=parsed.parallel_envs,
         arch=parsed.arch,
@@ -212,7 +225,7 @@ def main():
     torch.set_num_threads(1)
 
     args = parse_args()
-    for name in ("num_envs", "rallies_per_update", "total_timesteps", "num_minibatches", "update_epochs", "report_window_steps"):
+    for name in ("num_envs", "rallies_per_update", "total_timesteps", "num_minibatches", "update_epochs", "report_window_steps", "max_rally_steps"):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
 
@@ -317,8 +330,9 @@ def main():
         if args.save_model:
             # Save the starting weights (random, or the parent's) before collecting experience or updating.
             save_checkpoint(agent, args, run, start_step, 0, 0, checkpoint_step=initial_checkpoint)
-        collector = RallyCollector(envs, agent, device, args.seed, args.rallies_per_update, start_step)
-        # Finish the last batch at natural boundaries; actual steps may exceed the target.
+        collector = RallyCollector(envs, agent, device, args.seed, args.rallies_per_update, start_step,
+                                   max_rally_steps=args.max_rally_steps)
+        # Finish the last batch at point, cap or game boundaries; steps may exceed the target.
         while collector.global_step < args.total_timesteps:
             iteration += 1
             if args.anneal_lr:
@@ -344,7 +358,7 @@ def main():
             window_metrics = episode_window.metrics(global_step)
             print(f"[{tag}|s{args.seed}] update={iteration}, step={global_step}/{args.total_timesteps}, "
                   f"batch_steps={batch.steps}, rallies={batch.completed_rallies}, "
-                  f"ended_games={batch.ended_games}, SPS={sps}, "
+                  f"ended_games={batch.ended_games}, capped_rallies={batch.capped_rallies}, SPS={sps}, "
                   f"collect_s={collection_seconds:.3f}, update_s={update_seconds:.3f}")
             if args.track:
                 wandb.log({**losses,
@@ -359,6 +373,7 @@ def main():
                            "charts/batch/sequences": len(batch.rallies),
                            "charts/batch/max_sequence_steps": max(map(len, batch.rallies)),
                            "charts/batch/ended_games": batch.ended_games,
+                           "charts/batch/capped_rallies": batch.capped_rallies,
                            "charts/budget_overshoot_steps": max(0, global_step - args.total_timesteps),
                            **{f"charts/window/{key}": value for key, value in window_metrics.items()}})
     finally:

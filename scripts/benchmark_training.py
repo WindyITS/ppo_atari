@@ -48,7 +48,7 @@ def main():
     try:
         agent = make_agent("attn_lstm", envs).to(device)
         optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-        collector = RallyCollector(envs, agent, device, 99)
+        collector = RallyCollector(envs, agent, device, 99, max_rally_steps=args.max_rally_steps)
         print(json.dumps({"configuration": vars(parsed), "device": str(device),
                           "torch": torch.__version__,
                           "gpu": torch.cuda.get_device_name() if device.type == "cuda" else None}), flush=True)

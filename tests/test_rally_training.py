@@ -115,6 +115,66 @@ class RallyTrainingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ZeroDivisionError"):
             ParallelEnvPool([lambda: 1 / 0])
 
+    def test_rally_cap_bootstraps_and_resumes_without_reset_in_both_collectors(self):
+        for parallel in (False, True):
+            with self.subTest(parallel=parallel):
+                factories = [lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([10]))]
+                envs = ParallelEnvPool(factories) if parallel else gym.vector.SyncVectorEnv(factories)
+                try:
+                    collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1,
+                                               max_rally_steps=4)
+                    episodes = []
+                    for index in range(2):
+                        batch = collector.collect(1.0, 1.0, episodes.append)
+                        self.assertEqual([len(r) for r in batch.rallies], [4])
+                        self.assertEqual((batch.completed_rallies, batch.ended_games, batch.capped_rallies), (0,0,1))
+                        self.assertEqual(batch.rallies[0].initial_state[0][0,0,0], index * 4)
+                        torch.testing.assert_close(batch.rallies[0].returns, torch.full((4,), float(5 + index * 4)))
+                        self.assertEqual(episodes, [])
+                    last = collector.collect(1.0, 1.0, episodes.append)
+                    self.assertEqual([len(r) for r in last.rallies], [2])
+                    self.assertEqual((last.completed_rallies, last.ended_games, last.capped_rallies), (1,1,0))
+                    self.assertEqual(last.rallies[0].initial_state[0][0,0,0], 8)
+                    self.assertEqual(last.rallies[0].returns[-1], 1)
+                    self.assertEqual(episodes[0].episode_length, 10)
+                    self.assertEqual(collector.state[0].count_nonzero(), 0)
+                finally:
+                    envs.close()
+
+    def test_point_and_game_timeout_take_precedence_over_cap(self):
+        for timeout in (None, 4):
+            envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(
+                ScriptedGame([4] if timeout is None else [10], timeout_at=timeout))])
+            try:
+                collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1,
+                                           max_rally_steps=4)
+                episodes = []
+                batch = collector.collect(1.0, 1.0, episodes.append)
+                self.assertEqual(batch.capped_rallies, 0)
+                self.assertEqual(batch.ended_games, 1)
+                self.assertEqual(batch.rallies[0].returns[-1], 1 if timeout is None else 5)
+                self.assertEqual(episodes[0].outcome, "win" if timeout is None else "timeout")
+            finally:
+                envs.close()
+
+    def test_cap_flushes_earlier_points_and_pauses_other_lanes_independently(self):
+        factories = [lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([1,1,10])),
+                     lambda: gym.wrappers.RecordEpisodeStatistics(ScriptedGame([1] * 7))]
+        envs = gym.vector.SyncVectorEnv(factories)
+        try:
+            collector = RallyCollector(envs, MemoryCounter(), torch.device("cpu"), 1,
+                                       max_rally_steps=4)
+            batch = collector.collect(1.0, 1.0, lambda _: None)
+            self.assertEqual([len(r) for r in batch.rallies], [1,1,4,1,1,1,1,1])
+            self.assertEqual(batch.steps, 11)
+            self.assertEqual(batch.completed_rallies, 7)
+            self.assertEqual(batch.capped_rallies, 1)
+            self.assertEqual(envs.envs[0].unwrapped.steps, 6)
+            self.assertEqual(envs.envs[1].unwrapped.steps, 5)
+            self.assertEqual(batch.rallies[0].returns[0], 9)  # two points + cap bootstrap V=7
+        finally:
+            envs.close()
+
     def test_timeout_flushes_partial_rally_and_bootstraps_before_reset(self):
         envs = gym.vector.SyncVectorEnv([lambda: gym.wrappers.RecordEpisodeStatistics(
             ScriptedGame([2, 5], timeout_at=4))])

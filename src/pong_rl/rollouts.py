@@ -1,4 +1,4 @@
-"""On-policy batches ending at five points per environment or an actual game end."""
+"""On-policy batches bounded by rally quotas, game endings and rally step caps."""
 
 from dataclasses import dataclass
 from collections.abc import Callable
@@ -30,6 +30,7 @@ class RallyBatch:
     global_step: int
     completed_rallies: int
     ended_games: int
+    capped_rallies: int = 0
 
     @property
     def steps(self):
@@ -57,9 +58,12 @@ class RallyCollector:
     used after initialization. Every batch is collected with a single frozen policy.
     """
 
-    def __init__(self, envs, agent, device, seed, rallies_per_update=5, start_step=0):
+    def __init__(self, envs, agent, device, seed, rallies_per_update=5, start_step=0, max_rally_steps=512):
         if rallies_per_update <= 0:
             raise ValueError("rallies_per_update must be positive")
+        if max_rally_steps <= 0:
+            raise ValueError("max_rally_steps must be positive")
+        self.max_rally_steps = max_rally_steps
         self.envs, self.agent, self.device = envs, agent, device
         self.quota = rallies_per_update
         self.observations = list(envs.reset(seed=seed)[0])
@@ -72,6 +76,7 @@ class RallyCollector:
         n = len(self.envs.envs)
         active = list(range(n))
         counts = [0] * n
+        capped_rallies = 0
         ended = [False] * n
         terminated = [False] * n
         sequences = [[] for _ in range(n)]
@@ -101,7 +106,9 @@ class RallyCollector:
                 point = reward != 0  # raw Pong reward: +1 or -1 for each point
                 counts[i] += int(point)
                 ended[i], terminated[i] = bool(term or trunc), bool(term)
-                if point or ended[i]:
+                capped = len(pending[i]) >= self.max_rally_steps and not point and not ended[i]
+                capped_rallies += int(capped)
+                if point or ended[i] or capped:
                     sequences[i].append((pending[i], starts[i]))
                     pending[i] = []
                     starts[i] = self._state_for(i)
@@ -109,13 +116,13 @@ class RallyCollector:
                     episode = info["episode"]  # RecordEpisodeStatistics is the outer wrapper
                     on_episode(Episode(self.global_step, float(episode["r"]),
                                        int(episode["l"]), bool(term), bool(trunc)))
-                elif counts[i] < self.quota:
+                elif not capped and counts[i] < self.quota:
                     remaining.append(i)
             active = remaining
 
         rallies = []
         for i in range(n):
-            # A point boundary still bootstraps. A timeout bootstraps its final
+            # Point and cap boundaries bootstrap without resetting memory. A timeout uses its final
             # observation with pre-reset memory; a genuine termination does not.
             bootstrap = 0.0
             if not terminated[i]:
@@ -143,7 +150,7 @@ class RallyCollector:
                 self.observations[i], _ = self.envs.envs[i].reset()
                 for state in self.state:
                     state[:, i] = 0
-        return RallyBatch(rallies, self.global_step, sum(counts), sum(ended))
+        return RallyBatch(rallies, self.global_step, sum(counts), sum(ended), capped_rallies)
 
     def _state_for(self, i):
         return tuple(s[:, i:i+1].detach().cpu().clone() for s in self.state)

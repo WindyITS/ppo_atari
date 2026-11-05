@@ -71,27 +71,34 @@ with cells in row-major order (row = y, column = x), for analysing where the age
 the 7x7 map summarises an overlapping 36x36-pixel patch, with centres 8 pixels apart. The model is much
 smaller than the other two because it drops the 3136-to-512 dense layer; keep this in mind when comparing.
 
-All three use the same Nature CNN convolutions, PPO hyperparameters and collection rule. Each environment collects
-**five complete rallies**, or its remaining rallies when the game ends, before the next PPO update.
-A point is detected from Pong's nonzero reward. With eight environments, a normal batch contains 40 rallies;
-an environment that finishes early pauses while the others finish their batches. Every transition in an
-update therefore comes from the same frozen policy, and no unfinished rally is carried across an update.
+All three use the same Nature CNN convolutions, PPO hyperparameters and collection rule.
+Each environment collects **five rallies**, its game-ending remainder, or a partial rally
+that reaches **512 environment steps** (`--max-rally-steps`), whichever stops the lane first.
+A point is detected from Pong's nonzero reward. With eight environments, a normal batch
+contains 40 rallies; finished lanes pause while the others reach their boundaries. Every
+transition in an update comes from the same frozen policy. A capped rally resumes under
+the next updated policy; no pending transitions are carried into that next batch.
 
-The CNN shuffles observations into minibatches. Both recurrent agents (`lstm`, `attn_lstm`) replay each complete rally in order, starting
-from its saved memory; gradients cover the whole rally, with no fixed 128-step cutoff. Memory continues
-across points and updates and resets only when a game terminates or times out. Gradients stop between
-rallies. Replay retains activations for batches of up to 2048 padded steps. Larger batches use activation
-checkpointing to recompute 32-step chunks and reduce accelerator memory use; those compute
-chunks **do not detach memory or truncate gradients**. Very long rallies still take more time and memory.
+The CNN shuffles observations into minibatches. Both recurrent agents (`lstm`, `attn_lstm`)
+replay each collected sequence in order from its saved memory. Gradients cover the full
+sequence, up to the 512-step cap, and stop at point, cap or game boundaries. Memory continues
+across points, caps and updates and resets only when a game terminates or times out. A cap
+bootstraps from the current observation and memory; it does not end/reset the game, add a
+reward or report an episode outcome. Logs and W&B record `capped_rallies` separately from
+actual points and game endings.
+
+Replay retains activations for batches of up to 2048 padded steps. Larger batches use
+activation checkpointing to recompute 32-step chunks and reduce accelerator memory use;
+those compute chunks do not detach memory or truncate gradients within a sequence.
 
 All architectures use four PPO epochs and up to four nonempty minibatches per epoch. Recurrent minibatches
-batch whole rallies together with padding masked out of the loss; CNN minibatches shuffle steps. Losses are weighted by actual step
+batch collected sequences together with padding masked out of the loss; CNN minibatches shuffle steps. Losses are weighted by actual step
 counts, and advantages are normalized over the actual collected batch. GAE continues across scoring points.
 True game termination has zero bootstrap value; a timeout uses the final observation and pre-reset memory.
 A timeout can end a partial rally, whose available transitions are included in the game-ending remainder.
 
 The timestep target is a **soft aggregate environment-step budget**: the last batch is completed at its
-natural boundaries, so the actual count can exceed the target by the final batch. Learning-rate annealing
+point, cap or game boundaries, so the actual count can exceed the target by the final batch. Learning-rate annealing
 uses actual collected steps. W&B and checkpoints record actual steps and update counts; W&B also records
 batch lengths, completed rallies, maximum sequence length and budget overshoot. Compare actual experience
 counts when comparing runs. These changes apply only to newly started training processes.
@@ -119,7 +126,10 @@ Add `--arch lstm` (CNN + LSTM) or `--arch attn_lstm` (attention + LSTM) to any o
 Useful flags:
 - `--total-timesteps 15000000` (default: `15_000_000`, matching the last checkpoint milestone)
 - `--init-from PATH` (fine-tune from a checkpoint; see [Fine-tuning](#fine-tuning))
-- `--rallies-per-update 5` (default: five rallies per environment, or its game-ending remainder)
+- `--rallies-per-update 5` (default: five rallies per environment, stopping early on a game end or rally cap)
+- `--max-rally-steps 512` (maximum steps in one collected rally segment; game and memory continue afterward)
+- `--learning-rate 0.001` (initial learning rate; the existing linear annealing schedule remains enabled)
+- `--ent-coef 0.02` (entropy bonus coefficient)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
 - `--parallel-envs` (one CPU process per game; preserves individual pauses and resets; uses more host memory)
 - `--replay-checkpoint-threshold 2048` (retain activations for small replay batches; `0` always recomputes to save memory)
@@ -131,7 +141,7 @@ Use `--parallel-envs` for a single GPU training job to collect games in separate
 processes. Leave it off when running many simultaneous jobs unless CPU and RAM allow
 one worker per environment per job. Small recurrent replay batches retain activations;
 `--replay-checkpoint-threshold 0` restores always-on activation recomputation when memory
-is limited. Both paths preserve full-rally gradients and the same PPO optimizer groups.
+is limited. Both paths preserve gradients within each collected sequence and the same PPO optimizer groups.
 Training logs and W&B report collection and update times separately.
 
 Run a short benchmark without W&B, checkpoints, or changing existing runs:
@@ -171,8 +181,8 @@ those outcomes solely from an episode's length.
 
 Snapshots are taken at **0, 1M, 2M, 3M, 4M, 5M, 7.5M, 10M, 11M, 12M, 13M, 14M and 15M aggregate
 environment steps**; milestones beyond `--total-timesteps` are not requested. A from-scratch run saves its untrained
-weights at 0. Each snapshot is saved after the first complete-rally PPO update that reaches or passes
-its milestone, preserving the five-rally collection rule, so its actual step count can be above the
+weights at 0. Each snapshot is saved after the first PPO update that reaches or passes
+its milestone, preserving the rally-quota and step-cap collection rules, so its actual step count can be above the
 filename's milestone. If one batch crosses multiple milestones, those files hold the same weights.
 
 Each run has its own folder, `checkpoints/<scratch|finetune>/<arch>/<condition>/seed_<n>/`, where the
