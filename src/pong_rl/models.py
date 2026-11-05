@@ -1,10 +1,19 @@
+import math
+
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 
 LSTM_HIDDEN_SIZE = 128
+# Attention + LSTM: a few heads, each reading the 7x7 conv map with its own query.
+ATTENTION_HEADS = 2
+ATTENTION_KEY_SIZE = 32
+ATTENTION_VALUE_SIZE = 64
+CONV_GRID = 7  # the Nature CNN's last conv layer outputs a 7x7 map for 84x84 inputs
+CONV_CHANNELS = 64
 
 # (h, c) of the LSTM, each of shape (num_layers=1, batch, LSTM_HIDDEN_SIZE)
 LSTMState = tuple[torch.Tensor, torch.Tensor]
@@ -23,19 +32,37 @@ def layer_init(layer: nn.Conv2d | nn.Linear, std: float = np.sqrt(2), bias_const
     return layer
 
 
-def nature_cnn(in_channels: int) -> nn.Sequential:
-    """Nature DQN encoder: (B, in_channels, 84, 84) -> (B, 512)."""
-    return nn.Sequential(
+def nature_convs(in_channels: int) -> list[nn.Module]:
+    """Nature DQN convolutions: (B, in_channels, 84, 84) -> (B, 64, 7, 7)."""
+    return [
         layer_init(nn.Conv2d(in_channels, 32, 8, stride=4)),
         nn.ReLU(),
         layer_init(nn.Conv2d(32, 64, 4, stride=2)),
         nn.ReLU(),
-        layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+        layer_init(nn.Conv2d(64, CONV_CHANNELS, 3, stride=1)),
         nn.ReLU(),
+    ]
+
+
+def nature_cnn(in_channels: int) -> nn.Sequential:
+    """Nature DQN encoder: (B, in_channels, 84, 84) -> (B, 512).
+
+    Module indices (network.0, .2, .4, .7) are part of saved checkpoints; keep them stable.
+    """
+    return nn.Sequential(
+        *nature_convs(in_channels),
         nn.Flatten(),
-        layer_init(nn.Linear(64 * 7 * 7, 512)),
+        layer_init(nn.Linear(CONV_CHANNELS * CONV_GRID * CONV_GRID, 512)),
         nn.ReLU(),
     )
+
+
+def init_lstm(lstm: nn.LSTM):
+    for name, param in lstm.named_parameters():
+        if "bias" in name:
+            nn.init.constant_(param, 0)
+        elif "weight" in name:
+            nn.init.orthogonal_(param, 1.0)
 
 
 class Agent(nn.Module):
@@ -65,13 +92,46 @@ class Agent(nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 
-class LSTMAgent(nn.Module):
+class RecurrentAgent(nn.Module):
+    """PPO interface shared by agents that carry LSTM memory (h, c) across steps.
+
+    All methods take observations as a flattened, time-major sequence: x[t * batch + b] is step t
+    of sequence b, where batch = lstm_state[0].shape[1]. done[t * batch + b] = 1 means that
+    observation is the first of a new episode, so the state is reset to zero before processing it.
+    Subclasses implement get_states and define actor/critic heads on its outputs.
+    """
+
+    actor: nn.Linear
+    critic: nn.Linear
+
+    def get_states(
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+    ) -> tuple[torch.Tensor, LSTMState]:
+        raise NotImplementedError
+
+    def get_value(self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor) -> torch.Tensor:
+        hidden, _ = self.get_states(x, lstm_state, done)
+        return self.critic(hidden)
+
+    def get_action_and_value(
+        self,
+        x: torch.Tensor,
+        lstm_state: LSTMState,
+        done: torch.Tensor,
+        action: torch.Tensor | None = None,
+    ):
+        hidden, lstm_state = self.get_states(x, lstm_state, done)
+        logits = self.actor(hidden)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden), lstm_state
+
+
+class LSTMAgent(RecurrentAgent):
     """Nature CNN on a single 84x84 frame, followed by an LSTM that carries memory across steps.
 
-    Adapted from CleanRL's ppo_atari_lstm.py. All methods take observations as a flattened,
-    time-major sequence: x[t * batch + b] is step t of sequence b, where batch = lstm_state[0].shape[1].
-    done[t * batch + b] = 1 means that observation is the first of a new episode, so the LSTM
-    state is reset to zero before processing it.
+    Adapted from CleanRL's ppo_atari_lstm.py.
     """
 
     def __init__(self, envs: gym.vector.VectorEnv):
@@ -79,11 +139,7 @@ class LSTMAgent(nn.Module):
         assert envs.single_observation_space.shape is not None
         self.network = nature_cnn(envs.single_observation_space.shape[0])
         self.lstm = nn.LSTM(512, LSTM_HIDDEN_SIZE)
-        for name, param in self.lstm.named_parameters():
-            if "bias" in name:
-                nn.init.constant_(param, 0)
-            elif "weight" in name:
-                nn.init.orthogonal_(param, 1.0)
+        init_lstm(self.lstm)
         assert isinstance(envs.single_action_space, gym.spaces.Discrete)
         self.actor = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, int(envs.single_action_space.n)), std=0.01)
         self.critic = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, 1), std=1.0)
@@ -105,20 +161,81 @@ class LSTMAgent(nn.Module):
             outputs.append(out)
         return torch.flatten(torch.cat(outputs), 0, 1), lstm_state
 
-    def get_value(self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor) -> torch.Tensor:
-        hidden, _ = self.get_states(x, lstm_state, done)
-        return self.critic(hidden)
 
-    def get_action_and_value(
-        self,
-        x: torch.Tensor,
-        lstm_state: LSTMState,
-        done: torch.Tensor,
-        action: torch.Tensor | None = None,
-    ):
-        hidden, lstm_state = self.get_states(x, lstm_state, done)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden), lstm_state
+class AttentionLSTMAgent(RecurrentAgent):
+    """Nature CNN convolutions on a single frame, read through spatial attention by an LSTM.
+
+    Simplified from Mott et al. (2019), "Towards Interpretable Reinforcement Learning Using
+    Attention Augmented Agents". Each step:
+      1. The convolutions turn the frame into a 7x7 map of 64 features (49 cells); two fixed
+         channels add each cell's x and y position in [-1, 1].
+      2. Every cell gives a key and a value per head.
+      3. Each head's query comes from the previous hidden state h(t-1): memory decides where to look.
+      4. Softmax over the 49 scores q . k / sqrt(key size) gives the attention weights. q and k are
+         layer-normalised per head first (no learned scale), so the scores are not near zero at
+         initialisation; without this the weights stay uniform and the agent cannot learn where to look.
+      5. The weighted sums of values, concatenated over heads, are the LSTM's only input.
+    get_states_and_attention also returns the weights, shaped (T * batch, heads, 49), cells in
+    row-major order (row = y, column = x).
+    """
+
+    def __init__(self, envs: gym.vector.VectorEnv, heads: int = ATTENTION_HEADS,
+                 key_size: int = ATTENTION_KEY_SIZE, value_size: int = ATTENTION_VALUE_SIZE):
+        super().__init__()
+        assert envs.single_observation_space.shape is not None
+        self.heads, self.key_size, self.value_size = heads, key_size, value_size
+        self.encoder = nn.Sequential(*nature_convs(envs.single_observation_space.shape[0]))
+        ys, xs = torch.meshgrid(torch.linspace(-1, 1, CONV_GRID), torch.linspace(-1, 1, CONV_GRID), indexing="ij")
+        # Fixed, not learned: kept out of checkpoints so loading stays strict and simple.
+        self.register_buffer("positions", torch.stack((xs, ys), dim=-1).reshape(CONV_GRID * CONV_GRID, 2),
+                             persistent=False)
+        cell_size = CONV_CHANNELS + 2
+        self.keys = layer_init(nn.Linear(cell_size, heads * key_size), std=1.0)
+        self.values = layer_init(nn.Linear(cell_size, heads * value_size), std=1.0)
+        self.query = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, heads * key_size), std=1.0)
+        self.lstm = nn.LSTM(heads * value_size, LSTM_HIDDEN_SIZE)
+        init_lstm(self.lstm)
+        assert isinstance(envs.single_action_space, gym.spaces.Discrete)
+        self.actor = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, int(envs.single_action_space.n)), std=0.01)
+        self.critic = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, 1), std=1.0)
+
+    def get_states_and_attention(
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+    ) -> tuple[torch.Tensor, LSTMState, torch.Tensor]:
+        """Per-step LSTM outputs (T * batch, hidden), the final (h, c), and attention weights."""
+        assert done.numel() == x.shape[0], "need one done flag per observation"
+        batch = lstm_state[0].shape[1]
+        cells = self.encoder(x / 255.0).flatten(2).transpose(1, 2)  # (T*B, 49, 64)
+        cells = torch.cat((cells, self.positions.expand(cells.shape[0], -1, -1)), dim=-1)
+        n = cells.shape[1]
+        # Keys and values depend only on the frame, so compute them for all steps at once.
+        keys = F.layer_norm(self.keys(cells).reshape(-1, batch, n, self.heads, self.key_size), (self.key_size,))
+        values = self.values(cells).reshape(-1, batch, n, self.heads, self.value_size)
+        done = done.float().reshape((-1, batch))
+        h, c = lstm_state
+        outputs, weights = [], []
+        for k, v, d in zip(keys, values, done):
+            keep = (1.0 - d).view(1, -1, 1)
+            h, c = keep * h, keep * c
+            # The query needs this step's starting memory, so attention runs inside the time loop.
+            q = F.layer_norm(self.query(h[0]).reshape(batch, self.heads, self.key_size), (self.key_size,))
+            scores = torch.einsum("bnhk,bhk->bhn", k, q) / math.sqrt(self.key_size)
+            attention = scores.softmax(dim=-1)  # (B, heads, 49)
+            readout = torch.einsum("bhn,bnhv->bhv", attention, v).reshape(batch, self.heads * self.value_size)
+            out, (h, c) = self.lstm(readout.unsqueeze(0), (h, c))
+            outputs.append(out)
+            weights.append(attention)
+        return torch.flatten(torch.cat(outputs), 0, 1), (h, c), torch.flatten(torch.stack(weights), 0, 1)
+
+    def get_states(
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor
+    ) -> tuple[torch.Tensor, LSTMState]:
+        hidden, lstm_state, _ = self.get_states_and_attention(x, lstm_state, done)
+        return hidden, lstm_state
+
+
+AGENTS = {"cnn": Agent, "lstm": LSTMAgent, "attn_lstm": AttentionLSTMAgent}
+
+
+def make_agent(arch: str, envs: gym.vector.VectorEnv) -> nn.Module:
+    return AGENTS[arch](envs)

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from pong_rl.metrics import Episode
-from pong_rl.models import LSTMAgent, LSTMState, zero_lstm_state
+from pong_rl.models import LSTMState, RecurrentAgent, zero_lstm_state
 
 
 @dataclass
@@ -80,7 +80,7 @@ class RallyCollector:
         while active:
             obs = torch.as_tensor(np.stack([self.observations[i] for i in active]),
                                   device=self.device, dtype=torch.float32)
-            if isinstance(self.agent, LSTMAgent):
+            if isinstance(self.agent, RecurrentAgent):
                 action, logp, _, value, state = self.agent.get_action_and_value(
                     obs, tuple(s[:, active] for s in self.state),
                     torch.zeros(len(active), device=self.device))
@@ -118,7 +118,7 @@ class RallyCollector:
             if not terminated[i]:
                 obs = torch.as_tensor(np.asarray(self.observations[i])[None],
                                       device=self.device, dtype=torch.float32)
-                if isinstance(self.agent, LSTMAgent):
+                if isinstance(self.agent, RecurrentAgent):
                     value = self.agent.get_value(obs, tuple(s[:, i:i+1] for s in self.state),
                                                  torch.zeros(1, device=self.device))
                 else:

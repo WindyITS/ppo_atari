@@ -14,7 +14,7 @@ Course project investigating whether a pixel-based PPO agent in Atari Pong (`ALE
 ├── src/pong_rl/
 │   ├── __init__.py
 │   ├── envs.py             # Environment factory (AtariPreprocessing + custom wrappers + FrameStack)
-│   ├── models.py           # Nature CNN and CNN + LSTM Actor-Critics, exposing hidden states for linear probing
+│   ├── models.py           # CNN, CNN + LSTM and attention + LSTM Actor-Critics, exposing hidden states and attention
 │   ├── train.py            # CleanRL-based PPO training loop (feedforward or recurrent) with W&B tracking & checkpointing
 │   ├── rollouts.py         # Five-rally batches, game-end remainders, episode reporting and GAE
 │   ├── ppo.py              # Variable-size PPO batches and full-rally recurrent replay
@@ -43,20 +43,47 @@ uv run pytest
 |---|---|---|---|
 | `cnn` (default) | 4 stacked 84x84 frames | none beyond the 4 frames | CleanRL `ppo_atari.py` |
 | `lstm` | 1 84x84 frame | LSTM (128 units) over the whole episode | CleanRL `ppo_atari_lstm.py` |
+| `attn_lstm` | 1 84x84 frame | LSTM (128 units) that reads the frame through spatial attention | Mott et al. 2019, simplified |
 
-Both use the same Nature CNN encoder, PPO hyperparameters and collection rule. Each environment collects
+| `--arch` | Parameters | Image to LSTM |
+|---|---|---|
+| `cnn` | 1,687,719 | (no LSTM) whole frame flattened to 512 features |
+| `lstm` | 2,007,591 | whole frame flattened to 512 features |
+| `attn_lstm` | 225,959 | weighted read of the 7x7 conv map, 128 numbers |
+
+### Attention + LSTM (`attn_lstm`)
+
+Based on Mott et al. (2019), *Towards Interpretable Reinforcement Learning Using Attention Augmented
+Agents*, simplified. Each step:
+
+1. The three Nature CNN convolutions turn the frame into a 7x7 map of 64 features (49 cells; no flatten
+   and no 512-unit dense layer). Two fixed channels add each cell's x and y position in [-1, 1].
+2. Each cell gives a key (32 numbers) and a value (64 numbers) per head; there are 2 heads.
+3. Each head's query comes from the previous LSTM output h(t-1), so memory decides where to look.
+4. A softmax over the 49 scores `q · k / sqrt(32)` gives each head's attention weights. Queries and keys
+   are layer-normalised per head first (query-key normalisation, no learned scale). Without it the scores
+   start near zero, the weights stay uniform and, in a supervised check, never became selective.
+5. The weighted sums of values, concatenated over heads (2 x 64 = 128), are the LSTM's only input.
+   Actor and critic read the LSTM output, as in `lstm`.
+
+`AttentionLSTMAgent.get_states_and_attention` returns the weights, shaped `(steps * batch, 2, 49)`,
+with cells in row-major order (row = y, column = x), for analysing where the agent looks. Each cell of
+the 7x7 map summarises an overlapping 36x36-pixel patch, with centres 8 pixels apart. The model is much
+smaller than the other two because it drops the 3136-to-512 dense layer; keep this in mind when comparing.
+
+All three use the same Nature CNN convolutions, PPO hyperparameters and collection rule. Each environment collects
 **five complete rallies**, or its remaining rallies when the game ends, before the next PPO update.
 A point is detected from Pong's nonzero reward. With eight environments, a normal batch contains 40 rallies;
 an environment that finishes early pauses while the others finish their batches. Every transition in an
 update therefore comes from the same frozen policy, and no unfinished rally is carried across an update.
 
-The CNN shuffles observations into minibatches. The LSTM replays each complete rally in order, starting
+The CNN shuffles observations into minibatches. Both recurrent agents (`lstm`, `attn_lstm`) replay each complete rally in order, starting
 from its saved memory; gradients cover the whole rally, with no fixed 128-step cutoff. Memory continues
 across points and updates and resets only when a game terminates or times out. Gradients stop between
 rallies. Activation checkpointing recomputes 32-step chunks to reduce accelerator memory use; those compute
 chunks **do not detach memory or truncate gradients**. Very long rallies still take more time and memory.
 
-Both architectures use four PPO epochs and up to four nonempty minibatches per epoch. Recurrent minibatches
+All architectures use four PPO epochs and up to four nonempty minibatches per epoch. Recurrent minibatches
 group whole rallies by their lengths; CNN minibatches shuffle steps. Losses are weighted by actual step
 counts, and advantages are normalized over the actual collected batch. GAE continues across scoring points.
 True game termination has zero bootstrap value; a timeout uses the final observation and pre-reset memory.
@@ -86,7 +113,7 @@ uv run pong-rl --use-fog --seed 1
 uv run pong-rl --use-fog --mask-enemy --seed 1
 ```
 
-Add `--arch lstm` to any of the commands above to train the CNN + LSTM agent instead.
+Add `--arch lstm` (CNN + LSTM) or `--arch attn_lstm` (attention + LSTM) to any of the commands above.
 
 Useful flags:
 - `--total-timesteps 15000000` (default: `15_000_000`, matching the last checkpoint milestone)
@@ -179,8 +206,8 @@ uv run pong-eval checkpoints/scratch/cnn/fog_mask/seed_1/final.pt --policy greed
 ```
 
 Evaluation freezes the weights (`eval` and inference mode), restores each checkpoint's architecture
-and visibility condition, and uses four input frames for CNN and one for LSTM. Each episode resets
-the environment to `seed + episode_index` and clears LSTM memory after either completion or timeout.
+and visibility condition, and uses four input frames for CNN and one for `lstm` and `attn_lstm`. Each episode
+resets the environment to `seed + episode_index` and clears recurrent memory after either completion or timeout.
 Stochastic evaluation resets a separate CPU action generator to that episode's seed, independently
 of model initialization. Use the same episode count, seed, policy and device for comparisons;
 shared seeds do not promise bitwise identical results across devices or software versions.
@@ -203,7 +230,7 @@ restart or change to the optimizer, learning-rate schedule, or training time lim
 2. **finetune**: each finished clean scratch run's `step_10.0M.pt`, fine-tuned on `mask`, `fog` and
    `fog_mask` to 15M (another parent milestone: `PARENT_CHECKPOINT=step_05.0M.pt`).
 
-Defaults: `ARCHS="cnn lstm"`, `SEEDS="1 2 3"`, 8 parallel jobs, i.e. 24 scratch and 18 fine-tuning runs.
+Defaults: `ARCHS="cnn lstm attn_lstm"`, `SEEDS="1 2 3"`, 8 parallel jobs, i.e. 36 scratch and 27 fine-tuning runs.
 Fine-tuning starts after every scratch run has finished, and only from parents whose run completed.
 Runs whose `final.pt` exists are skipped, so rerunning the script resumes an interrupted sweep; an
 unfinished run's checkpoint and log folders are first moved aside to `<folder>.aborted_<time>`.

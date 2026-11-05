@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from pong_rl.models import LSTMAgent
+from pong_rl.models import RecurrentAgent
 
 
 def replay_rally(agent, rally, device, checkpoint_steps=32):
@@ -45,7 +45,7 @@ def update_policy(agent, optimizer, batch, args, device):
     if args.norm_adv:
         # Normalize over the actual batch for both architectures, including tiny remainders.
         advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
-    recurrent = isinstance(agent, LSTMAgent)
+    recurrent = isinstance(agent, RecurrentAgent)
     observations = None if recurrent else torch.cat([r.observations for r in rallies])
     actions = torch.cat([r.actions for r in rallies])
     totals = {key: 0.0 for key in ("value_loss", "policy_loss", "entropy", "old_approx_kl", "approx_kl", "clipfrac")}

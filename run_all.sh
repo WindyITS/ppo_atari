@@ -4,7 +4,7 @@
 #   Stage 2, finetune: each completed clean scratch run's 10M checkpoint, fine-tuned on mask, fog and
 #                      fog_mask up to the same TIMESTEPS (the step count continues from the parent).
 # Usage:
-#   bash run_all.sh                           # both stages; ARCHS="cnn lstm", SEEDS="1 2 3"
+#   bash run_all.sh                           # both stages; ARCHS="cnn lstm attn_lstm", SEEDS="1 2 3"
 #   STAGES=scratch bash run_all.sh            # only stage 1 (or STAGES=finetune)
 #   ARCHS=lstm SEEDS="1" bash run_all.sh      # a subset
 #   MAX_PARALLEL=6 bash run_all.sh            # at most 6 simultaneous jobs (default 8)
@@ -18,7 +18,7 @@ set -euo pipefail
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-read -r -a ARCHS <<< "${ARCHS:-cnn lstm}"
+read -r -a ARCHS <<< "${ARCHS:-cnn lstm attn_lstm}"
 read -r -a SEEDS <<< "${SEEDS:-1 2 3}"
 read -r -a STAGES <<< "${STAGES:-scratch finetune}"
 MAX_PARALLEL="${MAX_PARALLEL:-8}"

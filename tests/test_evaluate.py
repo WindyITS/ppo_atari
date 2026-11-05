@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from pong_rl.evaluate import evaluate_checkpoint, validate_output_path, write_report
-from pong_rl.models import Agent, LSTMAgent
+from pong_rl.models import AGENTS, LSTMAgent, make_agent
 
 
 class ShortGame(gym.Env):
@@ -44,7 +44,7 @@ class EvaluationTests(unittest.TestCase):
     def make_checkpoint(self, path, arch):
         channels = 4 if arch == "cnn" else 1
         env = gym.vector.SyncVectorEnv([lambda: ShortGame(channels, [])])
-        model = Agent(env) if arch == "cnn" else LSTMAgent(env)
+        model = make_agent(arch, env)
         with torch.no_grad():
             for param in model.parameters():
                 param.zero_()
@@ -57,7 +57,7 @@ class EvaluationTests(unittest.TestCase):
         env.close()
 
     def test_both_architectures_use_saved_masks_and_reproducible_action_rng(self):
-        for arch in ("cnn", "lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "model.pt"
                 self.make_checkpoint(path, arch)
@@ -99,7 +99,7 @@ class EvaluationTests(unittest.TestCase):
             path = Path(directory) / "lstm.pt"
             self.make_checkpoint(path, "lstm")
             factory = lambda *args, **kwargs: lambda: ShortGame(1, [])
-            with patch("pong_rl.evaluate.make_env", factory), patch("pong_rl.evaluate.LSTMAgent", MemoryProbe), contextlib.redirect_stderr(io.StringIO()):
+            with patch("pong_rl.evaluate.make_env", factory), patch.dict(AGENTS, {"lstm": MemoryProbe}), contextlib.redirect_stderr(io.StringIO()):
                 result = evaluate_checkpoint(path, episodes=3, seed=10000, policy="greedy")
             self.assertEqual(observed_starts, [True, True, True])
             self.assertEqual([row["outcome"] for row in result["episodes"]], ["timeout", "win", "timeout"])

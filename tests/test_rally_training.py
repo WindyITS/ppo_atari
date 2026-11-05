@@ -6,7 +6,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from pong_rl.models import Agent, LSTMAgent, zero_lstm_state
+from pong_rl.models import LSTMAgent, make_agent, zero_lstm_state
 from pong_rl.ppo import replay_rally, update_policy
 from pong_rl.rollouts import Rally, RallyCollector
 from pong_rl.train import Args
@@ -118,10 +118,15 @@ class RallyTrainingTests(unittest.TestCase):
                     envs.close()
 
     def test_checkpointed_replay_matches_full_rally_outputs_and_gradients(self):
+        for arch in ("lstm", "attn_lstm"):
+            with self.subTest(arch=arch):
+                self.check_checkpointed_replay(arch)
+
+    def check_checkpointed_replay(self, arch):
         torch.manual_seed(7)
         spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0, 255, (1,84,84), np.uint8),
                                  single_action_space=gym.spaces.Discrete(6))
-        agent = LSTMAgent(spaces)
+        agent = make_agent(arch, spaces)
         reference = copy.deepcopy(agent)
         obs = torch.randint(0, 256, (35, 1, 84, 84), dtype=torch.uint8)
         actions = torch.arange(35) % 6
@@ -142,12 +147,12 @@ class RallyTrainingTests(unittest.TestCase):
                 torch.testing.assert_close(actual.grad, expected.grad, atol=2e-6, rtol=2e-4)
 
     def test_both_architectures_update_from_tiny_variable_batches(self):
-        for arch in ("cnn", "lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch):
                 channels = 4 if arch == "cnn" else 1
                 spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0,255,(channels,84,84), np.uint8),
                                          single_action_space=gym.spaces.Discrete(6))
-                agent = Agent(spaces) if arch == "cnn" else LSTMAgent(spaces)
+                agent = make_agent(arch, spaces)
                 rallies = []
                 for length in (1, 3):
                     obs = torch.randint(0,256,(length,channels,84,84),dtype=torch.uint8)
@@ -168,12 +173,12 @@ class RallyTrainingTests(unittest.TestCase):
                 self.assertEqual(metrics["charts/optimizer_steps"], 4 if arch == "cnn" else 2)
 
     def test_unequal_rallies_are_weighted_by_steps_for_both_architectures(self):
-        for arch in ("cnn", "lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch):
                 channels = 4 if arch == "cnn" else 1
                 spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0,255,(channels,84,84), np.uint8),
                                          single_action_space=gym.spaces.Discrete(6))
-                agent = Agent(spaces) if arch == "cnn" else LSTMAgent(spaces)
+                agent = make_agent(arch, spaces)
                 reference = copy.deepcopy(agent)
                 rallies, ref_losses = [], []
                 for length in (1, 3):

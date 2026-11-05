@@ -18,7 +18,7 @@ import torch
 
 from pong_rl.envs import make_env
 from pong_rl.metrics import Episode, summarize_episodes
-from pong_rl.models import Agent, LSTMAgent, zero_lstm_state
+from pong_rl.models import RecurrentAgent, make_agent, zero_lstm_state
 from pong_rl.train import FRAME_STACK
 
 
@@ -82,7 +82,7 @@ def _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, 
         autoreset_mode=gym.vector.AutoresetMode.DISABLED,
     )
     try:
-        agent = LSTMAgent(envs) if arch == "lstm" else Agent(envs)
+        agent = make_agent(arch, envs)
         agent.load_state_dict(checkpoint["model_state_dict"], strict=True)
         if any(not torch.isfinite(param).all().item() for param in agent.parameters()):
             raise ValueError("checkpoint contains non-finite weights")
@@ -100,7 +100,7 @@ def _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, 
             episode_return, episode_length = 0.0, 0
             while True:
                 tensor = torch.as_tensor(obs, dtype=torch.float32, device=device)
-                if arch == "lstm":
+                if isinstance(agent, RecurrentAgent):
                     hidden, state = agent.get_states(tensor, state, torch.zeros(1, device=device))
                 else:
                     hidden = agent.get_hidden(tensor)

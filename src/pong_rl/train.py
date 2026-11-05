@@ -20,15 +20,15 @@ import torch.optim as optim
 import wandb
 
 from pong_rl.envs import make_env
-from pong_rl.models import Agent, LSTMAgent
+from pong_rl.models import make_agent
 from pong_rl.rollouts import RallyCollector
 from pong_rl.ppo import update_policy
 from pong_rl.metrics import Episode, EpisodeWindow
 
 gym.register_envs(ale_py)
 
-# Frames per observation: the CNN sees motion through stacking, the LSTM through its memory
-FRAME_STACK = {"cnn": 4, "lstm": 1}
+# Frames per observation: the CNN sees motion through stacking, the recurrent agents through memory
+FRAME_STACK = {"cnn": 4, "lstm": 1, "attn_lstm": 1}
 # Milestones in aggregate environment steps. A from-scratch run saves its untrained weights at 0;
 # a fine-tuning run saves its starting (parent) weights and then every later milestone.
 CHECKPOINT_STEPS = (0, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 7_500_000, 10_000_000, 11_000_000, 12_000_000, 13_000_000, 14_000_000, 15_000_000)
@@ -102,7 +102,8 @@ def parse_args() -> Args:
         "--arch",
         choices=list(FRAME_STACK),
         default="cnn",
-        help="cnn: Nature CNN on 4 stacked frames; lstm: Nature CNN + LSTM on 1 frame per step",
+        help="cnn: Nature CNN on 4 stacked frames; lstm: Nature CNN + LSTM on 1 frame per step; "
+             "attn_lstm: LSTM reading the CNN's 7x7 feature map through spatial attention, 1 frame per step",
     )
     parser.add_argument("--use-fog", action="store_true", help="Enable FogWrapper on agent half")
     parser.add_argument("--mask-enemy", action="store_true", help="Enable EnemyMaskWrapper on enemy paddle")
@@ -272,7 +273,7 @@ def main():
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     assert envs.single_observation_space.shape is not None
 
-    agent = LSTMAgent(envs).to(device) if args.arch == "lstm" else Agent(envs).to(device)
+    agent = make_agent(args.arch, envs).to(device)
     if parent_state is not None:
         agent.load_state_dict(parent_state, strict=True)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
