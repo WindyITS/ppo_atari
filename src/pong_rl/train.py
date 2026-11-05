@@ -12,12 +12,13 @@ import ale_py
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import wandb
 
 from pong_rl.envs import make_env
-from pong_rl.models import Agent, LSTMAgent, zero_lstm_state
+from pong_rl.models import Agent, LSTMAgent
+from pong_rl.rollouts import RallyCollector
+from pong_rl.ppo import update_policy
 from pong_rl.metrics import Episode, EpisodeWindow
 
 gym.register_envs(ale_py)
@@ -47,7 +48,8 @@ class Args:
     total_timesteps: int = 20_000_000
     learning_rate: float = 2.5e-4
     num_envs: int = 8
-    num_steps: int = 128
+    rallies_per_update: int = 5
+    rollout_scheme: str = "complete_rallies"
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -60,11 +62,6 @@ class Args:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: float | None = None
-
-    # Computed in runtime
-    batch_size: int = 0
-    minibatch_size: int = 0
-    num_iterations: int = 0
 
 
 def parse_args() -> Args:
@@ -81,6 +78,8 @@ def parse_args() -> Args:
     parser.add_argument("--mask-enemy", action="store_true", help="Enable EnemyMaskWrapper on enemy paddle")
     parser.add_argument("--total-timesteps", type=int, default=20_000_000)
     parser.add_argument("--num-envs", type=int, default=8)
+    parser.add_argument("--rallies-per-update", type=int, default=5,
+                        help="complete rallies per env, flushed early when its game ends")
     parser.add_argument("--track", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--wandb-project-name", type=str, default="pong-rl")
     parser.add_argument("--wandb-entity", type=str, default=None)
@@ -89,8 +88,9 @@ def parse_args() -> Args:
     parser.add_argument("--report-window-steps", type=int, default=500_000,
                         help="aggregate environment-step window for episodes ending in (step-window, step]")
     parsed = parser.parse_args()
-    if parsed.report_window_steps <= 0:
-        parser.error("--report-window-steps must be positive")
+    for name in ("report_window_steps", "rallies_per_update", "num_envs", "total_timesteps"):
+        if getattr(parsed, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
 
     return Args(
         exp_name=parsed.exp_name,
@@ -100,6 +100,7 @@ def parse_args() -> Args:
         mask_enemy=parsed.mask_enemy,
         total_timesteps=parsed.total_timesteps,
         num_envs=parsed.num_envs,
+        rallies_per_update=parsed.rallies_per_update,
         track=parsed.track,
         wandb_project_name=parsed.wandb_project_name,
         wandb_entity=parsed.wandb_entity,
@@ -114,11 +115,9 @@ def main():
     torch.set_num_threads(1)
 
     args = parse_args()
-    args.batch_size = int(args.num_envs * args.num_steps)
-    args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    args.num_iterations = args.total_timesteps // args.batch_size
-    if args.arch == "lstm":
-        assert args.num_envs % args.num_minibatches == 0, "LSTM minibatches are whole envs"
+    for name in ("num_envs", "rallies_per_update", "total_timesteps", "num_minibatches", "update_epochs", "report_window_steps"):
+        if getattr(args, name) <= 0:
+            raise ValueError(f"{name} must be positive")
 
     condition = f"fog_{int(args.use_fog)}_mask_{int(args.mask_enemy)}"
     tag = f"{args.arch}_{condition}"
@@ -168,8 +167,7 @@ def main():
             )
             for i in range(args.num_envs)
         ],
-        # The GAE computation below assumes the returned obs after a done is already the reset obs
-        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
+        autoreset_mode=gym.vector.AutoresetMode.DISABLED,
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     assert envs.single_observation_space.shape is not None
@@ -177,220 +175,57 @@ def main():
     agent = LSTMAgent(envs).to(device) if args.arch == "lstm" else Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # Storage setup: (128 steps, 8 envs, ...)
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
-    logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-
-    # Start the game
-    global_step = 0
-    start_time = time.time()
-    next_obs, _ = envs.reset(seed=args.seed)
-    next_obs = torch.tensor(next_obs, dtype=torch.float32, device=device)
-    next_done = torch.zeros(args.num_envs, device=device)
-    # LSTM memory, carried across steps and across rollouts (unused by the CNN agent)
-    next_lstm_state = zero_lstm_state(args.num_envs, device)
-
-    os.makedirs("checkpoints", exist_ok=True)
-
-    for iteration in range(1, args.num_iterations + 1):
-        # The update replays each env's rollout through the LSTM starting from this state
-        initial_lstm_state = (next_lstm_state[0].clone(), next_lstm_state[1].clone())
-
-        # 1. Learning rate annealing
-        if args.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
-
-        # 2. Rollout phase: collect 128 steps across 8 environments
-        for step in range(0, args.num_steps):
-            global_step += args.num_envs
-            obs[step] = next_obs
-            dones[step] = next_done
-
-            with torch.no_grad():
-                if isinstance(agent, LSTMAgent):
-                    action, logprob, _, value, next_lstm_state = agent.get_action_and_value(
-                        next_obs, next_lstm_state, next_done
-                    )
-                else:
-                    action, logprob, _, value = agent.get_action_and_value(next_obs)
-                values[step] = value.flatten()
-            actions[step] = action
-            logprobs[step] = logprob
-
-            next_obs_np, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            next_done_np = np.logical_or(terminations, truncations)
-            rewards[step] = torch.tensor(reward, dtype=torch.float32, device=device).view(-1)
-            next_obs = torch.tensor(next_obs_np, dtype=torch.float32, device=device)
-            next_done = torch.tensor(next_done_np, dtype=torch.float32, device=device)
-
-            # With SAME_STEP autoreset, finished episodes are logged in infos["final_info"]["episode"]
-            # with a boolean mask infos["final_info"]["_episode"]
-            final_info = infos.get("final_info", {})
-            if "episode" in final_info:
-                for i, has_ep in enumerate(final_info["_episode"]):
-                    if has_ep:
-                        ep_return = float(final_info["episode"]["r"][i])
-                        ep_length = int(final_info["episode"]["l"][i])
-                        episode = Episode(global_step, ep_return, ep_length,
-                                          bool(terminations[i]), bool(truncations[i]))
-                        episode_window.add(episode)
-                        with open(episode_log_path, "a", encoding="utf-8") as stream:
-                            stream.write(json.dumps({"arch": args.arch, "seed": args.seed,
-                                                     "condition": condition, **episode.to_dict()},
-                                                    allow_nan=False) + "\n")
-                        print(f"[{tag}|s{args.seed}] step={global_step}, return={ep_return}, "
-                              f"length={ep_length}, outcome={episode.outcome}, "
-                              f"terminated={int(episode.terminated)}, truncated={int(episode.truncated)}")
-                        if args.track:
-                            wandb.log(
-                                {
-                                    "charts/episodic_return": ep_return,
-                                    "charts/episodic_length": ep_length,
-                                    "charts/episode_terminated": int(episode.terminated),
-                                    "charts/episode_truncated": int(episode.truncated),
-                                    "charts/episode_outcome": episode.outcome,
-                                    "global_step": global_step,
-                                }
-                            )
-
-        # 3. GAE (Generalized Advantage Estimation)
-        with torch.no_grad():
-            if isinstance(agent, LSTMAgent):
-                next_value = agent.get_value(next_obs, next_lstm_state, next_done).reshape(1, -1)
-            else:
-                next_value = agent.get_value(next_obs).reshape(1, -1)
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            for t in reversed(range(args.num_steps)):
-                if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-            returns = advantages + values
-
-        # Flatten the batch: (128, 8, ...) -> (1024, ...)
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
-        b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-        b_dones = dones.reshape(-1)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
-        b_values = values.reshape(-1)
-
-        # 4. PPO Update phase: 4 epochs over the 1024 steps in minibatches of 256.
-        # The CNN samples random steps; the LSTM must replay whole sequences in order,
-        # so each of its minibatches is all 128 steps of num_envs / num_minibatches envs.
-        b_inds = np.arange(args.batch_size)
-        env_inds = np.arange(args.num_envs)
-        envs_per_batch = args.num_envs // args.num_minibatches
-        flat_inds = np.arange(args.batch_size).reshape(args.num_steps, args.num_envs)
-        clipfracs = []
-        for epoch in range(args.update_epochs):
-            if isinstance(agent, LSTMAgent):
-                np.random.shuffle(env_inds)
-            else:
-                np.random.shuffle(b_inds)
-            for mb in range(args.num_minibatches):
-                if isinstance(agent, LSTMAgent):
-                    mb_env_inds = env_inds[mb * envs_per_batch : (mb + 1) * envs_per_batch]
-                    # Time-major (step 0 of each env, step 1 of each env, ...), as get_states expects
-                    mb_inds = flat_inds[:, mb_env_inds].ravel()
-                    _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
-                        b_obs[mb_inds],
-                        (initial_lstm_state[0][:, mb_env_inds], initial_lstm_state[1][:, mb_env_inds]),
-                        b_dones[mb_inds],
-                        b_actions.long()[mb_inds],
-                    )
-                else:
-                    mb_inds = b_inds[mb * args.minibatch_size : (mb + 1) * args.minibatch_size]
-                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(
-                        b_obs[mb_inds], b_actions.long()[mb_inds]
-                    )
-                logratio = newlogprob - b_logprobs[mb_inds]
-                ratio = logratio.exp()
-
-                with torch.no_grad():
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
-
-                mb_advantages = b_advantages[mb_inds]
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
-                # Policy loss (Clipped surrogate objective)
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                # Value loss
-                newvalue = newvalue.view(-1)
-                if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-
-                entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                optimizer.step()
-
-            if args.target_kl is not None and approx_kl > args.target_kl:
-                break
-
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-        var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-        sps = int(global_step / (time.time() - start_time))
-        window_metrics = episode_window.metrics(global_step)
-
-        if iteration % 25 == 0:
-            print(f"[{tag}|s{args.seed}] iter={iteration}/{args.num_iterations}, step={global_step}, SPS={sps}")
-            print(f"[{tag}|s{args.seed}] reporting_window="
-                  f"({window_metrics['start_step_exclusive']},{global_step}], "
-                  f"episodes={window_metrics['episodes']}, mean_return={window_metrics['mean_return']}, "
-                  f"mean_length={window_metrics['mean_episode_length']}, "
-                  f"completed_games={window_metrics['completed_games']}, "
-                  f"completed_win_rate={window_metrics['completed_win_rate']}, "
-                  f"timeouts={window_metrics['timeouts']}")
-
+    def on_episode(episode):
+        episode_window.add(episode)
+        with open(episode_log_path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"arch": args.arch, "seed": args.seed,
+                                     "condition": condition, **episode.to_dict()}, allow_nan=False) + "\n")
+        print(f"[{tag}|s{args.seed}] step={episode.global_step}, return={episode.episode_return}, "
+              f"length={episode.episode_length}, outcome={episode.outcome}, "
+              f"terminated={int(episode.terminated)}, truncated={int(episode.truncated)}")
         if args.track:
-            wandb.log(
-                {
-                    "charts/learning_rate": optimizer.param_groups[0]["lr"],
-                    "losses/value_loss": v_loss.item(),
-                    "losses/policy_loss": pg_loss.item(),
-                    "losses/entropy": entropy_loss.item(),
-                    "losses/old_approx_kl": old_approx_kl.item(),
-                    "losses/approx_kl": approx_kl.item(),
-                    "losses/clipfrac": np.mean(clipfracs),
-                    "losses/explained_variance": explained_var,
-                    "charts/SPS": sps,
-                    "global_step": global_step,
-                    **{f"charts/window/{key}": value for key, value in window_metrics.items()},
-                }
-            )
+            wandb.log({"charts/episodic_return": episode.episode_return,
+                       "charts/episodic_length": episode.episode_length,
+                       "charts/episode_terminated": int(episode.terminated),
+                       "charts/episode_truncated": int(episode.truncated),
+                       "charts/episode_outcome": episode.outcome, "global_step": episode.global_step})
+
+    start_time = time.time()
+    iteration = 0
+    global_step = 0
+    optimizer_steps = 0
+    os.makedirs("checkpoints", exist_ok=True)
+    try:
+        collector = RallyCollector(envs, agent, device, args.seed, args.rallies_per_update)
+        # Finish the last batch at natural boundaries; actual steps may exceed the target.
+        while collector.global_step < args.total_timesteps:
+            iteration += 1
+            if args.anneal_lr:
+                optimizer.param_groups[0]["lr"] = args.learning_rate * max(
+                    0.0, 1.0 - collector.global_step / args.total_timesteps)
+            batch = collector.collect(args.gamma, args.gae_lambda, on_episode)
+            global_step = batch.global_step
+            losses = update_policy(agent, optimizer, batch, args, device)
+            optimizer_steps += losses.pop("charts/optimizer_steps")
+            sps = int(global_step / (time.time() - start_time))
+            window_metrics = episode_window.metrics(global_step)
+            print(f"[{tag}|s{args.seed}] update={iteration}, step={global_step}/{args.total_timesteps}, "
+                  f"batch_steps={batch.steps}, rallies={batch.completed_rallies}, "
+                  f"ended_games={batch.ended_games}, SPS={sps}")
+            if args.track:
+                wandb.log({**losses,
+                           "charts/learning_rate": optimizer.param_groups[0]["lr"],
+                           "charts/SPS": sps, "global_step": global_step,
+                           "charts/updates": iteration, "charts/optimizer_steps": optimizer_steps,
+                           "charts/batch/steps": batch.steps,
+                           "charts/batch/completed_rallies": batch.completed_rallies,
+                           "charts/batch/sequences": len(batch.rallies),
+                           "charts/batch/max_sequence_steps": max(map(len, batch.rallies)),
+                           "charts/batch/ended_games": batch.ended_games,
+                           "charts/budget_overshoot_steps": max(0, global_step - args.total_timesteps),
+                           **{f"charts/window/{key}": value for key, value in window_metrics.items()}})
+    finally:
+        envs.close()
 
     if args.save_model:
         ckpt_path = f"checkpoints/{tag}_seed_{args.seed}.pt"
@@ -401,6 +236,9 @@ def main():
                 "arch": args.arch,
                 "condition": condition,
                 "seed": args.seed,
+                "global_step": global_step,
+                "updates": iteration,
+                "optimizer_steps": optimizer_steps,
             },
             ckpt_path,
         )
@@ -410,7 +248,6 @@ def main():
 
     if args.track:
         wandb.finish()
-    envs.close()
 
 
 if __name__ == "__main__":

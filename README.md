@@ -16,6 +16,8 @@ Course project investigating whether a pixel-based PPO agent in Atari Pong (`ALE
 │   ├── envs.py             # Environment factory (AtariPreprocessing + custom wrappers + FrameStack)
 │   ├── models.py           # Nature CNN and CNN + LSTM Actor-Critics, exposing hidden states for linear probing
 │   ├── train.py            # CleanRL-based PPO training loop (feedforward or recurrent) with W&B tracking & checkpointing
+│   ├── rollouts.py         # Five-rally batches, game-end remainders, episode reporting and GAE
+│   ├── ppo.py              # Variable-size PPO batches and full-rally recurrent replay
 │   └── wrappers.py         # Custom `FogWrapper` (agent half) and `EnemyMaskWrapper` (enemy paddle)
 ├── pyproject.toml          # Project dependencies (managed with `uv`)
 └── run_all.sh              # Launches all 4 conditions x 2 seeds (8 runs) per architecture
@@ -36,9 +38,29 @@ uv sync
 | `cnn` (default) | 4 stacked 84x84 frames | none beyond the 4 frames | CleanRL `ppo_atari.py` |
 | `lstm` | 1 84x84 frame | LSTM (128 units) over the whole episode | CleanRL `ppo_atari_lstm.py` |
 
-Both use the same Nature CNN encoder and PPO hyperparameters. The LSTM agent resets its memory at episode
-boundaries and is trained with full 128-step sequences per env (minibatches are whole envs, not random steps),
-so its memory spans the whole episode while gradients flow back through at most 128 steps.
+Both use the same Nature CNN encoder, PPO hyperparameters and collection rule. Each environment collects
+**five complete rallies**, or its remaining rallies when the game ends, before the next PPO update.
+A point is detected from Pong's nonzero reward. With eight environments, a normal batch contains 40 rallies;
+an environment that finishes early pauses while the others finish their batches. Every transition in an
+update therefore comes from the same frozen policy, and no unfinished rally is carried across an update.
+
+The CNN shuffles observations into minibatches. The LSTM replays each complete rally in order, starting
+from its saved memory; gradients cover the whole rally, with no fixed 128-step cutoff. Memory continues
+across points and updates and resets only when a game terminates or times out. Gradients stop between
+rallies. Activation checkpointing recomputes 32-step chunks to reduce accelerator memory use; those compute
+chunks **do not detach memory or truncate gradients**. Very long rallies still take more time and memory.
+
+Both architectures use four PPO epochs and up to four nonempty minibatches per epoch. Recurrent minibatches
+group whole rallies by their lengths; CNN minibatches shuffle steps. Losses are weighted by actual step
+counts, and advantages are normalized over the actual collected batch. GAE continues across scoring points.
+True game termination has zero bootstrap value; a timeout uses the final observation and pre-reset memory.
+A timeout can end a partial rally, whose available transitions are included in the game-ending remainder.
+
+The timestep target is a **soft aggregate environment-step budget**: the last batch is completed at its
+natural boundaries, so the actual count can exceed the target by the final batch. Learning-rate annealing
+uses actual collected steps. W&B and checkpoints record actual steps and update counts; W&B also records
+batch lengths, completed rallies, maximum sequence length and budget overshoot. Compare actual experience
+counts when comparing runs. These changes apply only to newly started training processes.
 
 ## Running Training
 
@@ -62,6 +84,7 @@ Add `--arch lstm` to any of the commands above to train the CNN + LSTM agent ins
 
 Useful flags:
 - `--total-timesteps 20000000` (default: `20_000_000`)
+- `--rallies-per-update 5` (default: five rallies per environment, or its game-ending remainder)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
 - `--report-window-steps 500000` (report episodes ending in the latest 500,000 aggregate environment steps)
 
