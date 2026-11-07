@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--parallel-envs", action="store_true")
     parser.add_argument("--replay-checkpoint-threshold", type=int, default=2048)
-    parser.add_argument("--arch", choices=["cnn", "lstm", "attn_lstm"], default="attn_lstm")
+    parser.add_argument("--arch", choices=list(FRAME_STACK), default="attn_lstm")
     parser.add_argument("--num-envs", type=int, default=Args.num_envs)
     parser.add_argument("--num-steps", type=int, default=Args.num_steps, help="steps per game per batch")
     parser.add_argument("--update-epochs", type=int, default=Args.update_epochs)

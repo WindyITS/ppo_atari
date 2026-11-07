@@ -14,6 +14,14 @@ ATTENTION_KEY_SIZE = 32
 ATTENTION_VALUE_SIZE = 64
 CONV_GRID = 7  # the Nature CNN's last conv layer outputs a 7x7 map for 84x84 inputs
 CONV_CHANNELS = 64
+# Vision transformer: 12x12 patches of the 84x84 frame give the same 7x7 grid (49 tokens) as the CNN.
+# Sized so vit (4 frames) and vit_lstm (1 frame + LSTM) are within 3% of cnn and lstm respectively.
+VIT_PATCH = 12
+VIT_WIDTH = 160
+VIT_DEPTH = 5
+VIT_HEADS = 5  # 32 dimensions per head
+VIT_MLP_RATIO = 4
+FEATURES = 512  # latent size every encoder hands to the heads or the LSTM
 
 # (h, c) of the LSTM, each of shape (num_layers=1, batch, LSTM_HIDDEN_SIZE)
 LSTMState = tuple[torch.Tensor, torch.Tensor]
@@ -57,6 +65,70 @@ def nature_cnn(in_channels: int) -> nn.Sequential:
     )
 
 
+class TransformerBlock(nn.Module):
+    """Pre-norm transformer block without dropout: x + attn(LN(x)), then x + MLP(LN(x))."""
+
+    def __init__(self, width: int, heads: int, mlp_ratio: int):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(width)
+        self.attention = nn.MultiheadAttention(width, heads, dropout=0.0, batch_first=True)
+        self.norm2 = nn.LayerNorm(width)
+        self.mlp = nn.Sequential(nn.Linear(width, mlp_ratio * width), nn.GELU(), nn.Linear(mlp_ratio * width, width))
+
+    def forward(self, x: torch.Tensor, need_weights: bool = False) -> tuple[torch.Tensor, torch.Tensor | None]:
+        y = self.norm1(x)
+        y, weights = self.attention(y, y, y, need_weights=need_weights, average_attn_weights=False)
+        x = x + y
+        return x + self.mlp(self.norm2(x)), weights
+
+
+class ViTEncoder(nn.Module):
+    """Vision transformer encoder: (B, in_channels, 84, 84) in [0, 1] -> (B, 512).
+
+    Each 12x12 patch (all input channels together) becomes one token; a learned CLS token and learned
+    position embeddings are added, and the CLS output after the last block, layer-normalised and
+    projected to 512 features with a ReLU (as in nature_cnn), is the frame's representation.
+    forward(x, need_weights=True) also returns the CLS token's attention over the 49 patches in the last
+    block, shaped (B, heads, 49), patches in row-major order (row = y, column = x).
+    """
+
+    def __init__(self, in_channels: int, width: int = VIT_WIDTH, depth: int = VIT_DEPTH, heads: int = VIT_HEADS,
+                 mlp_ratio: int = VIT_MLP_RATIO, patch: int = VIT_PATCH):
+        super().__init__()
+        assert 84 % patch == 0 and width % heads == 0
+        self.tokens = (84 // patch) ** 2
+        # A stride-patch convolution is the standard patch embedding: one linear map per patch.
+        self.patch_embed = nn.Conv2d(in_channels, width, patch, stride=patch)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, width))
+        self.position = nn.Parameter(torch.zeros(1, self.tokens + 1, width))
+        self.blocks = nn.ModuleList(TransformerBlock(width, heads, mlp_ratio) for _ in range(depth))
+        self.norm = nn.LayerNorm(width)
+        self.project = layer_init(nn.Linear(width, FEATURES))
+        # Standard ViT initialisation (truncated normal, std 0.02) everywhere except the output projection,
+        # which uses the same orthogonal init as nature_cnn's 512-unit layer.
+        for module in [self.patch_embed, *self.blocks.modules()]:
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                nn.init.trunc_normal_(module.weight, std=0.02)
+                nn.init.zeros_(module.bias)
+        for block in self.blocks:
+            nn.init.trunc_normal_(block.attention.in_proj_weight, std=0.02)
+            nn.init.zeros_(block.attention.in_proj_bias)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.position, std=0.02)
+
+    def forward(self, x: torch.Tensor, need_weights: bool = False):
+        tokens = self.patch_embed(x).flatten(2).transpose(1, 2)  # (B, 49, width)
+        tokens = torch.cat((self.cls_token.expand(tokens.shape[0], -1, -1), tokens), dim=1) + self.position
+        weights = None
+        for i, block in enumerate(self.blocks):
+            tokens, weights = block(tokens, need_weights=need_weights and i == len(self.blocks) - 1)
+        features = F.relu(self.project(self.norm(tokens[:, 0])))
+        if not need_weights:
+            return features
+        assert weights is not None
+        return features, weights[:, :, 0, 1:]  # CLS row, patch columns: (B, heads, 49)
+
+
 def init_lstm(lstm: nn.LSTM):
     for name, param in lstm.named_parameters():
         if "bias" in name:
@@ -71,10 +143,15 @@ class Agent(nn.Module):
     def __init__(self, envs: gym.vector.VectorEnv):
         super().__init__()
         assert envs.single_observation_space.shape is not None
-        self.network = nature_cnn(envs.single_observation_space.shape[0])
+        self.network = self.make_encoder(envs.single_observation_space.shape[0])
         assert isinstance(envs.single_action_space, gym.spaces.Discrete)
-        self.actor = layer_init(nn.Linear(512, int(envs.single_action_space.n)), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1.0)
+        self.actor = layer_init(nn.Linear(FEATURES, int(envs.single_action_space.n)), std=0.01)
+        self.critic = layer_init(nn.Linear(FEATURES, 1), std=1.0)
+
+    @staticmethod
+    def make_encoder(in_channels: int) -> nn.Module:
+        """(B, in_channels, 84, 84) in [0, 1] -> (B, 512)."""
+        return nature_cnn(in_channels)
 
     def get_hidden(self, x: torch.Tensor) -> torch.Tensor:
         """Returns the 512-dim latent representation (useful for linear probing)."""
@@ -142,12 +219,17 @@ class LSTMAgent(RecurrentAgent):
     def __init__(self, envs: gym.vector.VectorEnv):
         super().__init__()
         assert envs.single_observation_space.shape is not None
-        self.network = nature_cnn(envs.single_observation_space.shape[0])
-        self.lstm = nn.LSTM(512, LSTM_HIDDEN_SIZE)
+        self.network = self.make_encoder(envs.single_observation_space.shape[0])
+        self.lstm = nn.LSTM(FEATURES, LSTM_HIDDEN_SIZE)
         init_lstm(self.lstm)
         assert isinstance(envs.single_action_space, gym.spaces.Discrete)
         self.actor = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, int(envs.single_action_space.n)), std=0.01)
         self.critic = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, 1), std=1.0)
+
+    @staticmethod
+    def make_encoder(in_channels: int) -> nn.Module:
+        """(B, in_channels, 84, 84) in [0, 1] -> (B, 512)."""
+        return nature_cnn(in_channels)
 
     def get_states(
         self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None
@@ -251,7 +333,37 @@ class AttentionLSTMAgent(RecurrentAgent):
         return hidden, lstm_state
 
 
-AGENTS = {"cnn": Agent, "lstm": LSTMAgent, "attn_lstm": AttentionLSTMAgent}
+class ViTAgent(Agent):
+    """Vision transformer Actor-Critic taking 4 stacked 84x84 frames: the cnn agent with a ViT encoder."""
+
+    @staticmethod
+    def make_encoder(in_channels: int) -> nn.Module:
+        return ViTEncoder(in_channels)
+
+    def get_hidden_and_attention(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """512-dim latent and the CLS attention over the 49 patches in the last block, (B, heads, 49)."""
+        return self.network(x / 255.0, need_weights=True)
+
+
+class ViTLSTMAgent(LSTMAgent):
+    """Vision transformer on a single 84x84 frame, followed by the same LSTM as the lstm agent."""
+
+    @staticmethod
+    def make_encoder(in_channels: int) -> nn.Module:
+        return ViTEncoder(in_channels)
+
+    def get_states_and_attention(
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None
+    ) -> tuple[torch.Tensor, LSTMState, torch.Tensor]:
+        """get_states plus each frame's CLS attention over the 49 patches, (T * batch, heads, 49).
+        The encoder sees only the frame, so the weights do not depend on memory."""
+        hidden, lstm_state = self.get_states(x, lstm_state, done)
+        with torch.no_grad():
+            _, weights = self.network(x / 255.0, need_weights=True)
+        return hidden, lstm_state, weights
+
+
+AGENTS = {"cnn": Agent, "lstm": LSTMAgent, "attn_lstm": AttentionLSTMAgent, "vit": ViTAgent, "vit_lstm": ViTLSTMAgent}
 
 
 def make_agent(arch: str, envs: gym.vector.VectorEnv) -> nn.Module:
