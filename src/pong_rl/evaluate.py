@@ -1,4 +1,4 @@
-"""Evaluate frozen CNN/LSTM checkpoints under an explicit, shared protocol."""
+"""Evaluate frozen checkpoints under an explicit, shared protocol, on their own view or any other."""
 
 import argparse
 from contextlib import contextmanager
@@ -20,6 +20,13 @@ from pong_rl.envs import make_env
 from pong_rl.metrics import Episode, summarize_episodes
 from pong_rl.models import RecurrentAgent, make_agent, zero_lstm_state
 from pong_rl.train import FRAME_STACK
+
+# Test views: (use_fog, mask_enemy). "own" (the default) means the view the checkpoint was trained on.
+VIEWS = {"clean": (False, False), "mask": (False, True), "fog": (True, False), "fog_mask": (True, True)}
+
+
+def view_name(use_fog: bool, mask_enemy: bool) -> str:
+    return next(name for name, flags in VIEWS.items() if flags == (use_fog, mask_enemy))
 
 
 def _checkpoint_config(checkpoint: dict) -> dict:
@@ -46,7 +53,13 @@ def evaluate_checkpoint(
     seed: int = 10_000,
     policy: str = "stochastic",
     device: str = "cpu",
+    view: str = "own",
+    quiet: bool = False,
 ) -> dict:
+    """view: "own" plays the checkpoint's training view; clean/mask/fog/fog_mask plays that view instead.
+    quiet: no per-episode progress lines on stderr."""
+    if view != "own" and view not in VIEWS:
+        raise ValueError(f"view must be own or one of {', '.join(VIEWS)}")
     if episodes <= 0 or seed < 0 or seed + episodes - 1 >= 2**63:
         raise ValueError("episodes must be positive and seeds must fit in [0, 2**63)")
     if policy not in ("stochastic", "greedy"):
@@ -57,8 +70,9 @@ def evaluate_checkpoint(
     checkpoint = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
     config = _checkpoint_config(checkpoint)
     arch = config["arch"]
+    eval_flags = (config["use_fog"], config["mask_enemy"]) if view == "own" else VIEWS[view]
     with _evaluation_torch_settings():
-        return _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, device)
+        return _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, device, eval_flags, quiet)
 
 
 @contextmanager
@@ -74,10 +88,11 @@ def _evaluation_torch_settings():
         torch.backends.cudnn.deterministic = deterministic
 
 
-def _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, device) -> dict:
+def _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, device, eval_flags, quiet) -> dict:
+    use_fog, mask_enemy = eval_flags
     envs = gym.vector.SyncVectorEnv(
-        [make_env(config["env_id"], 0, False, "evaluation", use_fog=config["use_fog"],
-                  mask_enemy=config["mask_enemy"], frame_stack=FRAME_STACK[arch])],
+        [make_env(config["env_id"], 0, False, "evaluation", use_fog=use_fog,
+                  mask_enemy=mask_enemy, frame_stack=FRAME_STACK[arch])],
         # Reset explicitly with the next evaluation seed after either end flag.
         autoreset_mode=gym.vector.AutoresetMode.DISABLED,
     )
@@ -120,9 +135,10 @@ def _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, 
                     records.append({"env_seed": episode_seed,
                                     "action_seed": episode_seed if policy == "stochastic" else None,
                                     **record.to_dict()})
-                    print(f"{path.name}: episode {episode_index + 1}/{episodes}, "
-                          f"return={episode_return}, length={episode_length}, outcome={record.outcome}",
-                          file=sys.stderr, flush=True)
+                    if not quiet:
+                        print(f"{path.name}: episode {episode_index + 1}/{episodes}, "
+                              f"return={episode_return}, length={episode_length}, outcome={record.outcome}",
+                              file=sys.stderr, flush=True)
                     break
         summary = summarize_episodes(Episode(**{key: row[key] for key in
             ("global_step", "episode_return", "episode_length", "terminated", "truncated")}) for row in records)
@@ -139,14 +155,24 @@ def _run_episodes(path, data, checkpoint, config, arch, episodes, seed, policy, 
             "init_from": checkpoint.get("init_from"),
             "training_updates": checkpoint.get("updates"),
             "env_id": config["env_id"],
-            "use_fog": config["use_fog"],
-            "mask_enemy": config["mask_enemy"],
+            # use_fog / mask_enemy describe the view the episodes were played on; train_* the training view.
+            "use_fog": use_fog,
+            "mask_enemy": mask_enemy,
+            "eval_view": view_name(use_fog, mask_enemy),
+            "train_use_fog": config["use_fog"],
+            "train_mask_enemy": config["mask_enemy"],
+            "train_view": view_name(config["use_fog"], config["mask_enemy"]),
             "max_num_frames_per_episode": frame_cap,
             "summary": summary,
             "episodes": records,
         }
     finally:
         envs.close()
+
+
+def software_versions() -> dict:
+    return {"python": platform.python_version(), "torch": str(torch.__version__), "gymnasium": gym.__version__,
+            "ale-py": version("ale-py"), "numpy": version("numpy")}
 
 
 def validate_output_path(output: Path | None, checkpoints: list[Path]):
@@ -180,6 +206,8 @@ def main():
     parser.add_argument("--seed", type=int, default=10_000, help="first evaluation seed; incremented each episode")
     parser.add_argument("--policy", choices=("stochastic", "greedy"), default="stochastic")
     parser.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu")
+    parser.add_argument("--view", choices=("own", *VIEWS), default="own",
+                        help="view to play: own (each checkpoint's training view) or a fixed one for all")
     parser.add_argument("--output", type=Path, help="JSON report; saved after each checkpoint")
     args = parser.parse_args()
     if args.episodes <= 0 or args.seed < 0 or args.seed + args.episodes - 1 >= 2**63:
@@ -199,9 +227,8 @@ def main():
             "policy": args.policy,
             "action_rng": "CPU torch.Generator reset to env_seed per episode" if args.policy == "stochastic" else None,
             "device": args.device,
-            "software_versions": {"python": platform.python_version(), "torch": str(torch.__version__),
-                                  "gymnasium": gym.__version__, "ale-py": version("ale-py"),
-                                  "numpy": version("numpy")},
+            "view": args.view,
+            "software_versions": software_versions(),
             "frozen_weights": True,
             "checkpoint_paths": [str(path.resolve()) for path in args.checkpoints],
             "completed_win_rate_denominator": "completed_games (timeouts excluded; draws included)",
@@ -210,7 +237,7 @@ def main():
     }
     for index, path in enumerate(args.checkpoints):
         report["results"].append(evaluate_checkpoint(path, episodes=args.episodes, seed=args.seed,
-                                                    policy=args.policy, device=args.device))
+                                                    policy=args.policy, device=args.device, view=args.view))
         report["complete"] = index == len(args.checkpoints) - 1
         if args.output:
             write_report(args.output, report)

@@ -250,8 +250,31 @@ uv run pong-eval checkpoints/*/*/*/seed_*/final.pt --episodes 20 --seed 10000 \
 uv run pong-eval checkpoints/scratch/cnn/fog_mask/seed_1/final.pt --policy greedy
 ```
 
+`--view clean|mask|fog|fog_mask` plays every checkpoint on that view instead of its own (`--view own`, the
+default). Reports record both: `use_fog`/`mask_enemy`/`eval_view` for the view played and
+`train_use_fog`/`train_mask_enemy`/`train_view` for the view the model was trained on.
+
+To evaluate a whole sweep on every view (the frozen evaluation in `docs/analysis_plan.md`):
+
+```bash
+# cnn + lstm: scratch finals, fine-tune finals and the clean 10M parents, each on all 4 views,
+# 30 games (seeds 10000-10029), sampling policy, 4 CPU processes -> evaluations/sweep_stochastic.jsonl
+uv run python scripts/evaluate_sweep.py
+uv run python scripts/evaluate_sweep.py --policy greedy --roles scratch --views own   # greedy check
+uv run python scripts/evaluate_sweep.py --archs vit vit_lstm --dry-run                # list the jobs only
+```
+
+It writes one JSON line per (checkpoint, view) as soon as it finishes; rerunning with the same output
+skips the jobs already there (same checkpoint bytes, view and protocol), so an interrupted run resumes.
+Before any game it checks every checkpoint against its folder (architecture, training view, scratch or
+fine-tune, the fine-tune's recorded parent hash) and stops on a mismatch. A killed worker or SIGTERM stops the
+run cleanly; rerun the same command to resume. Greedy caveat: with sticky actions off, a game's start depends
+only on the reset no-op count, and seeds 10000-10029 give 19 distinct counts, so greedy games repeat
+(effective n = 19); stochastic evaluation is unaffected.
+
 Evaluation freezes the weights (`eval` and inference mode), restores each checkpoint's architecture
-and visibility condition, and uses four input frames for CNN and one for `lstm` and `attn_lstm`. Each episode
+and visibility condition (unless `--view` overrides it), and uses four input frames for `cnn` and `vit`
+and one for the recurrent agents. Each episode
 resets the environment to `seed + episode_index` and clears recurrent memory after either completion or timeout.
 Stochastic evaluation resets a separate CPU action generator to that episode's seed, independently
 of model initialization. Use the same episode count, seed, policy and device for comparisons;

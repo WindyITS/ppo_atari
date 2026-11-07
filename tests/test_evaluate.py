@@ -84,6 +84,31 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual(result["training_updates"], 200)
                 self.assertEqual([row["env_seed"] for row in result["episodes"]], [10000,10001,10002,10003])
 
+    def test_view_override_plays_the_requested_view_and_records_both_views(self):
+        expected = {"own": (True, True), "clean": (False, False), "mask": (False, True), "fog": (True, False),
+                    "fog_mask": (True, True)}
+        for view, flags in expected.items():
+            with self.subTest(view=view), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "model.pt"
+                self.make_checkpoint(path, "lstm")  # trained on fog_mask
+                seen = []
+                def factory(env_id, idx, video, name, *, use_fog, mask_enemy, frame_stack):
+                    seen.append((use_fog, mask_enemy))
+                    return lambda: ShortGame(frame_stack, [])
+                with patch("pong_rl.evaluate.make_env", factory), contextlib.redirect_stderr(io.StringIO()) as err:
+                    result = evaluate_checkpoint(path, episodes=2, seed=10000, view=view, quiet=True)
+                self.assertEqual(seen, [flags])
+                self.assertEqual((result["use_fog"], result["mask_enemy"]), flags)
+                self.assertEqual(result["eval_view"], "fog_mask" if view == "own" else view)
+                self.assertEqual((result["train_view"], result["train_use_fog"], result["train_mask_enemy"]),
+                                 ("fog_mask", True, True))
+                self.assertEqual(err.getvalue(), "")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.pt"
+            self.make_checkpoint(path, "lstm")
+            with self.assertRaises(ValueError):
+                evaluate_checkpoint(path, view="foggy")
+
     def test_lstm_is_frozen_and_memory_is_reset_after_timeout_and_termination(self):
         observed_starts = []
         class MemoryProbe(LSTMAgent):
