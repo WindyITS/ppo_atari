@@ -90,6 +90,37 @@ class SweepTests(unittest.TestCase):
             self.assertFalse(any(".aborted_" in str(p) or "attn_lstm" in str(p) or "seed_3" in str(p)
                                  or "05.0M" in str(p) for _, p in found))
 
+    def test_equal_steps_pairs_scratch_k_with_finetune_10_plus_k_on_the_target_views(self):
+        self.assertEqual(sweep.equal_steps_files("step_10.0M.pt"),
+                         ([f"step_0{k}.0M.pt" for k in range(6)], [f"step_1{k}.0M.pt" for k in range(6)]))
+        with tempfile.TemporaryDirectory() as root:
+            make_tree(root)
+            scratch, finetune = sweep.equal_steps_files("step_10.0M.pt")
+            for view in FLAGS:
+                for name in scratch:
+                    save(root, f"scratch/cnn/{view}/seed_1/{name}", "cnn", view)
+            parent = Path(root, "scratch/cnn/clean/seed_1/step_10.0M.pt")
+            record = {"sha256": hashlib.sha256(parent.read_bytes()).hexdigest()}
+            for view in ("mask", "fog", "fog_mask"):
+                for name in finetune:
+                    save(root, f"finetune/cnn/clean_10.0M_to_{view}/seed_1/{name}", "cnn", view, kind="finetune",
+                         init_from=record)
+            save(root, "scratch/lstm/fog/seed_3/step_02.0M.pt", "lstm", "fog")  # run never finished
+            save(root, "scratch/cnn/fog/seed_1/step_07.5M.pt", "cnn", "fog")    # not one of the k steps
+            out, err, code = run_main(root, Path(root, "eval.jsonl"), "--equal-steps", "--dry-run")
+            self.assertEqual(code, 0, err)
+            jobs = [line.split()[0] for line in out.splitlines() if line.startswith("  ")]
+            self.assertEqual(len(jobs), 3 * 6 * 2)  # 3 target views x 6 k x (scratch, fine-tune), seed 1 only
+            self.assertIn("scratch/cnn/fog_mask/seed_1/step_00.0M.pt", jobs)
+            self.assertIn("finetune/cnn/clean_10.0M_to_fog_mask/seed_1/step_15.0M.pt", jobs)
+            self.assertFalse(any("/clean/" in j or "final.pt" in j or "7.5M" in j or "lstm" in j for j in jobs))
+            self.assertTrue(all(line.endswith((" on mask", " on fog", " on fog_mask"))
+                                for line in out.splitlines() if line.startswith("  ")))
+            for line in out.splitlines():
+                if line.startswith("  "):
+                    run, view = line.split()[0], line.split()[-1]
+                    self.assertTrue(run.split("/")[2].endswith(view))  # own view only
+
     def test_jobs_cover_every_view_and_own_resolves_to_the_training_view(self):
         with tempfile.TemporaryDirectory() as root:
             make_tree(root)

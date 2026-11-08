@@ -1,6 +1,6 @@
 import gymnasium as gym
 
-from pong_rl.wrappers import EnemyMaskWrapper, FogWrapper
+from pong_rl.wrappers import CleanFrameTap, EnemyMaskWrapper, FogWrapper
 
 
 def make_env(
@@ -11,7 +11,9 @@ def make_env(
     use_fog: bool = False,
     mask_enemy: bool = False,
     frame_stack: int = 4,
+    tap_clean_frame: bool = False,
 ):
+    """tap_clean_frame: keep the unoccluded frame readable as env.get_wrapper_attr("clean_frame")."""
     def thunk():
         # Match DeepMind 2013/2015 & CleanRL PongNoFrameskip-v4:
         # frameskip=1 (handled by AtariPreprocessing) and repeat_action_probability=0.0 (no sticky actions)
@@ -37,6 +39,8 @@ def make_env(
             terminal_on_life_loss=False,
             grayscale_obs=True,
         )
+        if tap_clean_frame:
+            env = CleanFrameTap(env)
         if use_fog:
             env = FogWrapper(env)
         if mask_enemy:

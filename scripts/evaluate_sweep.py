@@ -4,12 +4,19 @@ Run from the project root, e.g. (the defaults are the cnn/lstm protocol in docs/
     uv run python scripts/evaluate_sweep.py
     uv run python scripts/evaluate_sweep.py --policy greedy --roles scratch --views own   # greedy check
     uv run python scripts/evaluate_sweep.py --dry-run                                     # list the jobs
+    uv run python scripts/evaluate_sweep.py --equal-steps    # fine-tune vs scratch after the same k steps
 
-Checkpoints (under --root, default checkpoints/), for each --archs:
-    scratch   scratch/<arch>/<view>/seed_<n>/final.pt
-    finetune  finetune/<arch>/clean_<label>_to_<view>/seed_<n>/final.pt, label from --parent-checkpoint
+Checkpoints (under --root, default checkpoints/), for each --archs and --train-views:
+    scratch   scratch/<arch>/<view>/seed_<n>/<each of --scratch-files, default final.pt>
+    finetune  finetune/<arch>/clean_<label>_to_<view>/seed_<n>/<each of --finetune-files, default final.pt>,
+              label from --parent-checkpoint
     parent    scratch/<arch>/clean/seed_<n>/<--parent-checkpoint>, the fine-tunes' starting point
 Only finished runs (final.pt present) are used, and folders set aside by run_all.sh (".aborted_") are skipped.
+
+--equal-steps (step 3 of docs/analysis_plan.md) evaluates, on the training view only, the mask/fog/fog_mask
+runs after k = 0, 1, ..., 5 M steps on that view: scratch step_00.0M ... step_05.0M against fine-tune
+step_10.0M ... step_15.0M (a fine-tune's step_10.0M holds its parent's weights: k = 0). It replaces
+--roles, --views, --train-views, --scratch-files and --finetune-files; the rows go to the same --output.
 Before any game is played, every checkpoint is checked against its folder (architecture, training view,
 scratch/fine-tune, and a fine-tune's recorded parent hash); any mismatch stops the run.
 
@@ -39,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROLES = ("scratch", "finetune", "parent")
+EQUAL_STEPS_K = range(6)  # millions of steps on the target view
 # Bump when evaluate.py changes in a way that changes results, so old rows are not reused on resume.
 PROTOCOL_VERSION = 1
 
@@ -64,19 +72,33 @@ def parent_label(parent_checkpoint: str) -> str:
     return parent_checkpoint.removeprefix("step_").removesuffix(".pt")
 
 
-def discover(root: Path, archs, roles, parent_checkpoint: str) -> list[tuple[str, Path]]:
+def step_file(millions: float) -> str:
+    """5 -> step_05.0M.pt, as train.py names its milestone checkpoints."""
+    return f"step_{millions:04.1f}M.pt"
+
+
+def equal_steps_files(parent_checkpoint: str) -> tuple[list[str], list[str]]:
+    """Scratch and fine-tune checkpoint files after k M steps on the target view, k in EQUAL_STEPS_K."""
+    start = float(parent_label(parent_checkpoint).removesuffix("M"))
+    return [step_file(k) for k in EQUAL_STEPS_K], [step_file(start + k) for k in EQUAL_STEPS_K]
+
+
+def discover(root: Path, archs, roles, parent_checkpoint: str, scratch_files=("final.pt",),
+             finetune_files=("final.pt",), train_views=None) -> list[tuple[str, Path]]:
     """(role, checkpoint path) for every finished run, sorted for a stable job order."""
     found = []
     label = parent_label(parent_checkpoint)
     for arch in archs:
-        if "scratch" in roles:
-            found += [("scratch", p) for p in root.glob(f"scratch/{arch}/*/seed_*/final.pt")]
-        if "finetune" in roles:
-            found += [("finetune", p) for p in root.glob(f"finetune/{arch}/clean_{label}_to_*/seed_*/final.pt")]
+        for name in scratch_files if "scratch" in roles else ():
+            found += [("scratch", p) for p in root.glob(f"scratch/{arch}/*/seed_*/{name}")]
+        for name in finetune_files if "finetune" in roles else ():
+            found += [("finetune", p) for p in root.glob(f"finetune/{arch}/clean_{label}_to_*/seed_*/{name}")]
         if "parent" in roles:
-            found += [("parent", p) for p in root.glob(f"scratch/{arch}/clean/seed_*/{parent_checkpoint}")
-                      if (p.parent / "final.pt").is_file()]  # only parents whose run finished
-    return sorted((role, p) for role, p in found if not any(".aborted_" in part for part in p.parts))
+            found += [("parent", p) for p in root.glob(f"scratch/{arch}/clean/seed_*/{parent_checkpoint}")]
+    return sorted({(role, p) for role, p in found
+                   if (p.parent / "final.pt").is_file()  # only runs that finished
+                   and not any(".aborted_" in part for part in p.parts)
+                   and (train_views is None or train_view_from_path(role, p) in train_views)})
 
 
 def train_view_from_path(role: str, path: Path) -> str:
@@ -193,6 +215,14 @@ def main():
     parser.add_argument("--roles", nargs="+", choices=ROLES, default=list(ROLES))
     parser.add_argument("--views", nargs="+", choices=("own", *VIEWS), default=list(VIEWS),
                         help="views to play each checkpoint on; own = its training view")
+    parser.add_argument("--train-views", nargs="+", choices=VIEWS, default=None,
+                        help="only checkpoints trained on these views (default all)")
+    parser.add_argument("--scratch-files", nargs="+", default=["final.pt"],
+                        help="checkpoint files of each scratch run to evaluate")
+    parser.add_argument("--finetune-files", nargs="+", default=["final.pt"],
+                        help="checkpoint files of each fine-tune run to evaluate")
+    parser.add_argument("--equal-steps", action="store_true",
+                        help="fine-tune vs scratch after the same steps on the target view (see above)")
     parser.add_argument("--parent-checkpoint", default="step_10.0M.pt")
     parser.add_argument("--episodes", type=int, default=30)
     parser.add_argument("--seed", type=int, default=10_000)
@@ -204,11 +234,15 @@ def main():
     args = parser.parse_args()
     if args.episodes <= 0 or args.seed < 0 or args.workers < 0:
         parser.error("--episodes must be positive, --seed and --workers nonnegative")
+    if args.equal_steps:
+        args.roles, args.views, args.train_views = ["scratch", "finetune"], ["own"], ["mask", "fog", "fog_mask"]
+        args.scratch_files, args.finetune_files = equal_steps_files(args.parent_checkpoint)
     output = args.output or Path("evaluations") / f"sweep_{args.policy}.jsonl"
     protocol = {"version": PROTOCOL_VERSION, "episodes": args.episodes, "seed": args.seed,
                 "policy": args.policy, "device": "cpu"}
 
-    checkpoints = discover(args.root, args.archs, args.roles, args.parent_checkpoint)
+    checkpoints = discover(args.root, args.archs, args.roles, args.parent_checkpoint,
+                           args.scratch_files, args.finetune_files, args.train_views)
     if not checkpoints:
         parser.error(f"no finished checkpoints found under {args.root} for {' '.join(args.archs)}")
     hashes = {str(path): sha256(path) for _, path in checkpoints}

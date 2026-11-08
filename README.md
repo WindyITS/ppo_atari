@@ -10,6 +10,8 @@ Course project investigating whether a pixel-based PPO agent in Atari Pong (`ALE
 .
 ├── assets/                 # Visualizations of the 4 wrapper states
 ├── scripts/
+│   ├── evaluate_sweep.py   # Frozen evaluation of a whole sweep on every view (resumable, CPU workers)
+│   ├── fog_exposure.py     # How long the fog hides the ball and what still reveals it
 │   └── render_states.py    # Generates the 2x2 grid of wrapper screenshots
 ├── src/pong_rl/
 │   ├── __init__.py
@@ -262,6 +264,19 @@ To evaluate a whole sweep on every view (the frozen evaluation in `docs/analysis
 uv run python scripts/evaluate_sweep.py
 uv run python scripts/evaluate_sweep.py --policy greedy --roles scratch --views own   # greedy check
 uv run python scripts/evaluate_sweep.py --archs vit vit_lstm --dry-run                # list the jobs only
+# Fine-tune vs scratch after the same k = 0..5M steps on the target view (mask, fog, fog_mask), own view:
+# scratch step_00.0M..step_05.0M against fine-tune step_10.0M..step_15.0M (step_10.0M = the parent's weights)
+uv run python scripts/evaluate_sweep.py --equal-steps
+```
+
+How long the fog hides the ball, and what still gives its position away: `scripts/fog_exposure.py` replays
+the evaluation's games of the fog / fog_mask scratch finals on their own view while reading the clean screen
+(`make_env(..., tap_clean_frame=True)`), and reports per checkpoint the hidden stretches of the ball (incoming
+vs outgoing), the share of hidden steps on which a 4-frame stack holds no ball, and how closely each paddle's
+height follows the hidden ball's (`evaluations/fog_exposure.jsonl`, with per-step traces).
+
+```bash
+uv run python scripts/fog_exposure.py      # 30 games per checkpoint, 4 CPU processes, a few minutes
 ```
 
 It writes one JSON line per (checkpoint, view) as soon as it finishes; rerunning with the same output

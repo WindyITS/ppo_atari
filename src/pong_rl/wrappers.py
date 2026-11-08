@@ -18,6 +18,19 @@ BOTTOM_WALL_EDGE_Y = COURT_Y_MAX
 BOTTOM_WALL_EDGE_VALUE = 147
 
 
+class CleanFrameTap(gym.ObservationWrapper):
+    """Passes observations through unchanged and keeps the latest one in clean_frame, so analyses can read
+    the unoccluded screen while the agent sees the occluded one (insert it before the occlusion wrappers)."""
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        self.clean_frame = None
+
+    def observation(self, observation: np.ndarray) -> np.ndarray:
+        self.clean_frame = observation.copy()
+        return observation
+
+
 class CourtColumnMaskWrapper(gym.ObservationWrapper):
     """Hides everything in the court columns x in [x_start, x_end), including the wall edge rows."""
 
