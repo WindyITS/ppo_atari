@@ -121,6 +121,27 @@ class SweepTests(unittest.TestCase):
                     run, view = line.split()[0], line.split()[-1]
                     self.assertTrue(run.split("/")[2].endswith(view))  # own view only
 
+    def test_tagged_finetunes_are_skipped_unless_their_tag_is_requested(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_tree(root)
+            parent = Path(root, "scratch/lstm/clean/seed_1/step_10.0M.pt")
+            record = {"sha256": hashlib.sha256(parent.read_bytes()).hexdigest()}
+            for name in ("step_15.0M.pt", "final.pt"):
+                save(root, f"finetune/lstm/clean_10.0M_to_fog_mask__ft15M/seed_1/{name}", "lstm", "fog_mask",
+                     kind="finetune", init_from=record)
+            plain = sweep.discover(Path(root), ["lstm"], ["finetune"], "step_10.0M.pt")
+            self.assertEqual(len(plain), 6)
+            self.assertFalse(any("__" in str(p) for _, p in plain))
+            tagged = sweep.discover(Path(root), ["lstm"], ["finetune"], "step_10.0M.pt",
+                                    finetune_files=("step_15.0M.pt", "final.pt"), finetune_tag="ft15M")
+            self.assertEqual([p.name for _, p in tagged], ["final.pt", "step_15.0M.pt"])
+            self.assertEqual(sweep.train_view_from_path("finetune", tagged[0][1]), "fog_mask")
+            out, err, code = run_main(root, Path(root, "eval.jsonl"), "--archs", "lstm", "--roles", "finetune",
+                                      "--views", "own", "--finetune-tag", "ft15M", "--dry-run")
+            self.assertEqual(code, 0, err)
+            jobs = [line.split()[0] for line in out.splitlines() if line.startswith("  ")]
+            self.assertEqual(jobs, ["finetune/lstm/clean_10.0M_to_fog_mask__ft15M/seed_1/final.pt"])
+
     def test_jobs_cover_every_view_and_own_resolves_to_the_training_view(self):
         with tempfile.TemporaryDirectory() as root:
             make_tree(root)

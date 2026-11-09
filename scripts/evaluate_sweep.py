@@ -84,8 +84,11 @@ def equal_steps_files(parent_checkpoint: str) -> tuple[list[str], list[str]]:
 
 
 def discover(root: Path, archs, roles, parent_checkpoint: str, scratch_files=("final.pt",),
-             finetune_files=("final.pt",), train_views=None) -> list[tuple[str, Path]]:
-    """(role, checkpoint path) for every finished run, sorted for a stable job order."""
+             finetune_files=("final.pt",), train_views=None, finetune_tag=None) -> list[tuple[str, Path]]:
+    """(role, checkpoint path) for every finished run, sorted for a stable job order.
+
+    Fine-tune folders tagged by train.py --run-tag (<parent>_to_<view>__<tag>) are skipped unless
+    finetune_tag names their tag, in which case only those are taken."""
     found = []
     label = parent_label(parent_checkpoint)
     for arch in archs:
@@ -98,11 +101,18 @@ def discover(root: Path, archs, roles, parent_checkpoint: str, scratch_files=("f
     return sorted({(role, p) for role, p in found
                    if (p.parent / "final.pt").is_file()  # only runs that finished
                    and not any(".aborted_" in part for part in p.parts)
+                   and (role != "finetune" or tag_of(p) == finetune_tag)
                    and (train_views is None or train_view_from_path(role, p) in train_views)})
 
 
+def tag_of(path: Path) -> str | None:
+    """finetune/<arch>/<parent>_to_<view>__<tag>/seed_<n>/<file> -> <tag> (None when untagged)."""
+    folder = path.parent.parent.name
+    return folder.split("__", 1)[1] if "__" in folder else None
+
+
 def train_view_from_path(role: str, path: Path) -> str:
-    folder = path.parent.parent.name  # scratch: <view>; finetune: <parent>_to_<view>
+    folder = path.parent.parent.name.split("__", 1)[0]  # scratch: <view>; finetune: <parent>_to_<view>[__<tag>]
     return folder.split("_to_")[-1] if role == "finetune" else folder
 
 
@@ -221,6 +231,9 @@ def main():
                         help="checkpoint files of each scratch run to evaluate")
     parser.add_argument("--finetune-files", nargs="+", default=["final.pt"],
                         help="checkpoint files of each fine-tune run to evaluate")
+    parser.add_argument("--finetune-tag", default=None,
+                        help="evaluate only fine-tunes tagged by train.py --run-tag (folders <parent>_to_<view>__<tag>);"
+                             " untagged fine-tunes are used otherwise")
     parser.add_argument("--equal-steps", action="store_true",
                         help="fine-tune vs scratch after the same steps on the target view (see above)")
     parser.add_argument("--parent-checkpoint", default="step_10.0M.pt")
@@ -242,7 +255,7 @@ def main():
                 "policy": args.policy, "device": "cpu"}
 
     checkpoints = discover(args.root, args.archs, args.roles, args.parent_checkpoint,
-                           args.scratch_files, args.finetune_files, args.train_views)
+                           args.scratch_files, args.finetune_files, args.train_views, args.finetune_tag)
     if not checkpoints:
         parser.error(f"no finished checkpoints found under {args.root} for {' '.join(args.archs)}")
     hashes = {str(path): sha256(path) for _, path in checkpoints}
