@@ -2,6 +2,7 @@
 # https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_ataripy
 # https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_atari_lstmpy
 import argparse
+import dataclasses
 import hashlib
 import io
 import json
@@ -82,6 +83,7 @@ class Args:
     init_from: str | None = None
     run_tag: str | None = None  # appended to the run folder name, so a variant never shares files with a run
     reinit: tuple[str, ...] = ()  # modules of the parent re-initialised before fine-tuning
+    resume: str | None = None  # milestone checkpoint of an interrupted run to continue in the same folder
 
     # Algorithm specific arguments
     env_id: str = "ALE/Pong-v5"
@@ -136,6 +138,11 @@ def parse_args() -> Args:
     parser.add_argument("--reinit", nargs="+", choices=REINIT_MODULES, default=(),
                         help="with --init-from: re-initialise these top-level modules (fresh weights seeded by "
                              "--seed) and load the rest from the parent")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="continue an interrupted run from one of its milestone checkpoints, in the same folder "
+                             "and on the same learning-rate schedule; all other settings are read from the "
+                             "checkpoint (only --track/--no-track and --parallel-envs apply). Restores the Adam "
+                             "state when the checkpoint holds it, else starts a fresh Adam (recorded).")
     parser.add_argument("--learning-rate", type=float, default=None,
                         help="initial Adam learning rate, annealed over the run; default depends on --arch: "
                              + ", ".join(f"{arch} {lr:g}" for arch, lr in LEARNING_RATE.items()))
@@ -160,6 +167,8 @@ def parse_args() -> Args:
     parser.add_argument("--report-window-steps", type=int, default=500_000,
                         help="aggregate environment-step window for episodes ending in (step-window, step]")
     parsed = parser.parse_args()
+    if parsed.resume is not None:
+        return resume_args(parsed.resume, track=parsed.track, parallel_envs=parsed.parallel_envs)
     for name in ("report_window_steps", "num_envs", "total_timesteps"):
         if getattr(parsed, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
@@ -208,6 +217,30 @@ def parse_args() -> Args:
     )
 
 
+def resume_args(path: str, **overrides) -> Args:
+    """The Args of the run a checkpoint belongs to, to continue it (--resume)."""
+    saved = torch.load(path, map_location="cpu", weights_only=True)["args"]
+    names = {field.name for field in dataclasses.fields(Args)}
+    values = {key: value for key, value in saved.items() if key in names}
+    values["reinit"] = tuple(values.get("reinit") or ())
+    return Args(**{**values, **overrides, "resume": str(path)})
+
+
+def load_resume(path: str, args: Args) -> dict:
+    """A milestone checkpoint of an unfinished run, checked to belong to the run described by args."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    if checkpoint.get("checkpoint_step") is None or checkpoint.get("run") is None:
+        raise ValueError("--resume needs a milestone checkpoint (step_*.pt) of a run, not final.pt")
+    folder = Path("checkpoints") / checkpoint["run"]
+    if Path(path).resolve().parent != folder.resolve():
+        raise ValueError(f"--resume: {path} is not inside its own run folder {folder}")
+    if checkpoint.get("arch", args.arch) != args.arch or checkpoint["seed"] != args.seed:
+        raise ValueError("--resume: checkpoint does not match the run's arch and seed")
+    if checkpoint["global_step"] >= args.total_timesteps:
+        raise ValueError("--resume: the checkpoint is already at the run's total steps")
+    return checkpoint
+
+
 def load_parent(path: str, arch: str) -> tuple[dict, dict]:
     """Load a checkpoint to fine-tune from: (weights, metadata recorded in every child checkpoint)."""
     data = Path(path).read_bytes()
@@ -235,7 +268,7 @@ def load_parent(path: str, arch: str) -> tuple[dict, dict]:
     return checkpoint["model_state_dict"], metadata
 
 
-def save_checkpoint(agent, args, run, global_step, updates, optimizer_steps, checkpoint_step=None):
+def save_checkpoint(agent, args, run, global_step, updates, optimizer_steps, checkpoint_step=None, optimizer=None):
     """Save evaluation weights atomically; distinguish requested milestone from actual experience.
 
     checkpoint_step=None writes final.pt, the end-of-training model (also the run's completion marker).
@@ -252,7 +285,10 @@ def save_checkpoint(agent, args, run, global_step, updates, optimizer_steps, che
                         "run": run["dir"], "kind": run["kind"], "start_step": run["start_step"],
                         "init_from": run["init_from"], "steps_since_start": global_step - run["start_step"],
                         "global_step": global_step, "updates": updates,
-                        "optimizer_steps": optimizer_steps, "checkpoint_step": checkpoint_step}, stream)
+                        "optimizer_steps": optimizer_steps, "checkpoint_step": checkpoint_step,
+                        # Adam's moments, so an interrupted run can be resumed exactly (--resume)
+                        **({"optimizer_state_dict": optimizer.state_dict()} if optimizer is not None else {}),
+                        "resumed_from": run.get("resumed_from")}, stream)
         os.replace(temporary, path)
     finally:
         if temporary is not None:
@@ -273,31 +309,46 @@ def main():
 
     condition = condition_id(args.use_fog, args.mask_enemy)
     label = condition_label(args.use_fog, args.mask_enemy)
-    parent_state, parent = load_parent(args.init_from, args.arch) if args.init_from else (None, None)
-    kind = "finetune" if parent else "scratch"
-    # A fine-tune continues its parent's step count, so both kinds share one step axis. Its starting
-    # weights are labelled by the parent's milestone (e.g. 10.0M), else by the parent's actual step.
-    start_step = parent["global_step"] if parent else 0
-    initial_checkpoint = parent["checkpoint_step"] if parent and parent["checkpoint_step"] is not None else start_step
-    # The folder names the parent checkpoint, so fine-tunes from different parents never share files.
-    run_label = f"{parent['condition_label']}_{step_label(initial_checkpoint)}_to_{label}" if parent else label
-    if args.run_tag:
-        run_label = f"{run_label}__{args.run_tag}"
-    if args.reinit:
-        if parent is None:
-            raise ValueError("reinit needs a parent checkpoint (init_from)")
-        parent["reinit"] = sorted(args.reinit)
-    if start_step >= args.total_timesteps:
-        raise ValueError(f"--total-timesteps ({args.total_timesteps}) must exceed the starting step ({start_step})")
-    run = {"dir": f"{kind}/{args.arch}/{run_label}/seed_{args.seed}", "kind": kind,
-           "condition": condition, "start_step": start_step, "init_from": parent}
+    resumed = load_resume(args.resume, args) if args.resume else None
+    if resumed is not None:
+        # Continue the interrupted run: its folder, step origin (learning-rate schedule) and parent.
+        parent_state, parent = None, resumed["init_from"]
+        kind, start_step = resumed["kind"], resumed["start_step"]
+        initial_checkpoint = resumed["checkpoint_step"]
+        run_label = resumed["run"].split("/")[2]
+        run = {"dir": resumed["run"], "kind": kind, "condition": condition, "start_step": start_step,
+               "init_from": parent,
+               "resumed_from": {"checkpoint": Path(args.resume).name, "global_step": int(resumed["global_step"]),
+                                "fresh_optimizer": "optimizer_state_dict" not in resumed,
+                                "earlier": resumed.get("resumed_from")}}
+    else:
+        parent_state, parent = load_parent(args.init_from, args.arch) if args.init_from else (None, None)
+        kind = "finetune" if parent else "scratch"
+        # A fine-tune continues its parent's step count, so both kinds share one step axis. Its starting
+        # weights are labelled by the parent's milestone (e.g. 10.0M), else by the parent's actual step.
+        start_step = parent["global_step"] if parent else 0
+        initial_checkpoint = parent["checkpoint_step"] if parent and parent["checkpoint_step"] is not None else start_step
+        # The folder names the parent checkpoint, so fine-tunes from different parents never share files.
+        run_label = f"{parent['condition_label']}_{step_label(initial_checkpoint)}_to_{label}" if parent else label
+        if args.run_tag:
+            run_label = f"{run_label}__{args.run_tag}"
+        if args.reinit:
+            if parent is None:
+                raise ValueError("reinit needs a parent checkpoint (init_from)")
+            parent["reinit"] = sorted(args.reinit)
+        if start_step >= args.total_timesteps:
+            raise ValueError(f"--total-timesteps ({args.total_timesteps}) must exceed the starting step ({start_step})")
+        run = {"dir": f"{kind}/{args.arch}/{run_label}/seed_{args.seed}", "kind": kind,
+               "condition": condition, "start_step": start_step, "init_from": parent}
+    # Steps already taken when this process starts (a resumed run continues from its checkpoint).
+    first_step = int(resumed["global_step"]) if resumed is not None else start_step
     if args.save_model and (Path("checkpoints") / run["dir"] / "final.pt").exists():
         # Never overwrite a finished run's checkpoints: a variant needs its own --run-tag.
         raise ValueError(f"checkpoints/{run['dir']} already holds a finished run; choose a --run-tag")
     tag = f"{kind}_{args.arch}_{run_label}"
     started = int(time.time())
     run_name = f"{tag}__seed_{args.seed}__{started}"
-    episode_window = EpisodeWindow(args.report_window_steps, start_step)
+    episode_window = EpisodeWindow(args.report_window_steps, first_step)
     log_dir = Path("logs") / run["dir"]
     log_dir.mkdir(parents=True, exist_ok=True)
     episode_log_path = log_dir / f"episodes_{started}.jsonl"
@@ -308,7 +359,8 @@ def main():
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
-            config={**vars(args), "kind": kind, "run": run["dir"], "start_step": start_step, "init_from": parent},
+            config={**vars(args), "kind": kind, "run": run["dir"], "start_step": start_step, "init_from": parent,
+                    "resumed_from": run.get("resumed_from")},
             group=tag,
             name=run_name,
             save_code=True,
@@ -316,10 +368,11 @@ def main():
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
 
-    # Seeding
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    # Seeding (a resumed run draws fresh games and actions rather than replaying the run's first ones)
+    seed = args.seed if resumed is None else (args.seed * 1_000_003 + first_step) % 2**31
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     if torch.cuda.is_available() and args.cuda:
@@ -363,7 +416,13 @@ def main():
             raise ValueError("parent checkpoint does not match the agent outside the re-initialised modules")
     elif parent_state is not None:
         agent.load_state_dict(parent_state, strict=True)
+    if resumed is not None:
+        agent.load_state_dict(resumed["model_state_dict"], strict=True)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    if resumed is not None and "optimizer_state_dict" in resumed:
+        optimizer.load_state_dict(resumed["optimizer_state_dict"])
+    elif resumed is not None:
+        print(f"Warning: {args.resume} holds no optimizer state; resuming with a fresh Adam")
 
     def on_episode(episode):
         episode_window.add(episode)
@@ -381,17 +440,17 @@ def main():
                        "charts/episode_outcome": episode.outcome, "global_step": episode.global_step})
 
     start_time = time.time()
-    iteration = 0
-    global_step = start_step
-    optimizer_steps = 0
+    iteration = int(resumed["updates"]) if resumed is not None else 0
+    global_step = first_step
+    optimizer_steps = int(resumed["optimizer_steps"]) if resumed is not None else 0
     pending_checkpoints = iter(step for step in (*CHECKPOINT_STEPS, *LONG_RUN_CHECKPOINT_STEPS)
                                if initial_checkpoint < step <= args.total_timesteps)
     next_checkpoint = next(pending_checkpoints, None)
     try:
-        if args.save_model:
+        if args.save_model and resumed is None:
             # Save the starting weights (random, or the parent's) before collecting experience or updating.
-            save_checkpoint(agent, args, run, start_step, 0, 0, checkpoint_step=initial_checkpoint)
-        collector = RolloutCollector(envs, agent, device, args.seed, args.num_steps, start_step)
+            save_checkpoint(agent, args, run, start_step, 0, 0, checkpoint_step=initial_checkpoint, optimizer=optimizer)
+        collector = RolloutCollector(envs, agent, device, seed, args.num_steps, first_step)
         # The last batch is always completed, so steps may exceed the target by less than one batch.
         while collector.global_step < args.total_timesteps:
             iteration += 1
@@ -412,9 +471,9 @@ def main():
             while next_checkpoint is not None and global_step >= next_checkpoint:
                 if args.save_model:
                     save_checkpoint(agent, args, run, global_step, iteration,
-                                    optimizer_steps, checkpoint_step=next_checkpoint)
+                                    optimizer_steps, checkpoint_step=next_checkpoint, optimizer=optimizer)
                 next_checkpoint = next(pending_checkpoints, None)
-            sps = int((global_step - start_step) / (time.time() - start_time))
+            sps = int((global_step - first_step) / (time.time() - start_time))
             window_metrics = episode_window.metrics(global_step)
             print(f"[{tag}|s{args.seed}] update={iteration}, step={global_step}/{args.total_timesteps}, "
                   f"batch_steps={batch.steps}, points={batch.points}, "
@@ -449,7 +508,7 @@ def main():
         envs.close()
 
     if args.save_model:
-        save_checkpoint(agent, args, run, global_step, iteration, optimizer_steps)
+        save_checkpoint(agent, args, run, global_step, iteration, optimizer_steps, optimizer=optimizer)
 
     if args.track:
         wandb.finish()

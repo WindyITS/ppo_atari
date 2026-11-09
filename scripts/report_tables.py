@@ -145,9 +145,6 @@ def main():
 
     # E3 probes
     probes = read_jsonl(args.analysis / "probes.jsonl")
-    cnn_probes = read_jsonl(args.analysis / "probes_cnn.jsonl")  # rerun after the dead-unit fix (43087ae)
-    if cnn_probes:
-        probes = [r for r in probes if r["arch"] != "cnn"] + cnn_probes
     if probes:
         print("\n## E3 probes: R^2 for the ball's current height, by steps into the agent's half (0-3 / 4-7 / 8+)\n")
         print("| arch | view | kind | seed | return | hidden | memory | frame-only | own paddle | exit: memory |\n|---|---|---|---|---|---|---|---|---|---|")

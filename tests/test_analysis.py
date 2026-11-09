@@ -1,3 +1,6 @@
+import contextlib
+import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -140,6 +143,31 @@ class PlayerTests(unittest.TestCase):
             self.assertTrue(all((obs[..., 14:77, 42:72] == 87).all() for obs in seen))  # fog applied
             player.close()
 
+
+
+def analyse_for_test(path):  # module level, so spawned workers can import it
+    if path.name == "bad.npz":
+        raise RuntimeError("broken recording")
+    return {"recording": str(path), "size": len(path.name)}
+
+
+class BatchTests(unittest.TestCase):
+    def test_rows_are_appended_and_finished_recordings_skipped_after_an_interruption(self):
+        from pong_rl.analysis.batch import finished, run_all
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder, f"{name}.npz") for name in ("a", "b", "bad", "c")]
+            output = Path(folder, "out.jsonl")
+            # an earlier run finished "a" and was cut while writing the next row
+            output.write_text(json.dumps({"recording": str(paths[0]), "size": -1}) + "\n" + '{"recording": "x')
+            self.assertEqual(finished(output, "recording"), {str(paths[0])})
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                failures = run_all(analyse_for_test, paths, output, "recording", workers=2)
+            self.assertEqual(failures, 1)
+            rows = [json.loads(line) for line in output.read_text().splitlines() if line.startswith('{"recording": "/')
+                    or line.startswith('{"recording": "' + folder)]
+            self.assertEqual(sorted(r["recording"] for r in rows), sorted(str(p) for p in paths if p.stem != "bad"))
+            self.assertEqual([r["size"] for r in rows if r["recording"] == str(paths[0])], [-1])  # not redone
+            self.assertEqual(finished(output, "recording"), {str(p) for p in paths if p.stem != "bad"})
 
 
 class ProbeTests(unittest.TestCase):

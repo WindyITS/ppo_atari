@@ -2,6 +2,8 @@
 
     uv run python scripts/summarize_rollouts.py              # analysis/rollouts -> analysis/rollout_summary.jsonl
 
+Rows are appended as each recording finishes; recordings already in the output are skipped.
+
 Per recording (scripts/record_rollouts.py):
   play       mean return, points, incoming passes and agent hits per point, policy entropy, action shares
   passes     on incoming passes through the agent's half (pong_rl.analysis.rollouts): spread of the entry and
@@ -17,6 +19,7 @@ Per recording (scripts/record_rollouts.py):
 """
 
 import argparse
+import functools
 import json
 from pathlib import Path
 import sys
@@ -24,6 +27,7 @@ import sys
 import numpy as np
 import torch
 
+from pong_rl.analysis.batch import run_all
 from pong_rl.analysis.rollouts import hits, incoming_passes, load
 
 ACTIONS = ("noop", "fire", "up", "down", "up_fire", "down_fire")  # Pong: RIGHT moves the paddle up, LEFT down
@@ -122,7 +126,7 @@ def gate_stats(arrays, checkpoint, window):
     return out
 
 
-def summarize(path: Path, root: Path) -> dict:
+def summarize(path: Path, root: Path = Path(".")) -> dict:
     arrays, meta = load(path)
     passes = incoming_passes(arrays)
     window = in_window_mask(arrays, passes)
@@ -132,7 +136,7 @@ def summarize(path: Path, root: Path) -> dict:
     hit_list = hits(arrays)
     offsets = np.array([h["offset"] for h in hit_list])
     vy = np.array([h["vy_out"] for h in hit_list])
-    row = {"recording": path.stem, **{k: meta[k] for k in ("arch", "train_view", "view", "kind", "run", "checkpoint",
+    row = {"recording": str(path), **{k: meta[k] for k in ("arch", "train_view", "view", "kind", "run", "checkpoint",
                                                             "mean_return", "steps")},
            "play": {"points": points, "won": int((arrays["reward"] > 0).sum()),
                     "passes_per_point": len(passes) / points if points else None,
@@ -156,25 +160,25 @@ def summarize(path: Path, root: Path) -> dict:
     return row
 
 
+def describe(row: dict) -> str:
+    return (f"return {row['mean_return']:+.1f}, passes/point {row['play']['passes_per_point']}, "
+            f"late share {row['passes'].get('late_share')}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rollouts", type=Path, default=Path("analysis/rollouts"))
     parser.add_argument("--root", type=Path, default=Path("."), help="folder the recorded checkpoint paths are under")
     parser.add_argument("--match", default="")
     parser.add_argument("--output", type=Path, default=Path("analysis/rollout_summary.jsonl"))
+    parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     paths = sorted(p for p in args.rollouts.glob("*.npz") if args.match in p.name and not p.name.endswith(".tmp.npz"))
     if not paths:
         sys.exit("no recordings found")
-    rows = []
-    for path in paths:
-        rows.append(summarize(path, args.root))
-        r = rows[-1]
-        print(f"{path.stem}: return {r['mean_return']:+.1f}, passes/point {r['play']['passes_per_point']:.2f}, "
-              f"late share {r['passes'].get('late_share')}", flush=True)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    print(f"Wrote {len(rows)} rows to {args.output}")
+    failures = run_all(functools.partial(summarize, root=args.root), paths, args.output, "recording",
+                       args.workers, describe)
+    sys.exit(1 if failures else 0)
 
 
 if __name__ == "__main__":

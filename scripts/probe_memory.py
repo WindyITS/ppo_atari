@@ -16,7 +16,8 @@ from these inputs (whatever the recording holds):
 Probes are ridge regressions, evaluated by 5-fold cross-validation over games (the ridge penalty picked by an
 inner 4-fold split of the training games). Reported: R^2 and mean absolute error in pixels, overall and by
 steps since entering the window (0-3: the cnn's stack still holds the ball under fog; 4-7; 8+).
-Output: JSON lines (default analysis/probes.jsonl), one row per recording.
+Output: JSON lines (default analysis/probes.jsonl), one row per recording, appended as each finishes;
+recordings already in the output are skipped (pong_rl.analysis.batch).
 """
 
 import argparse
@@ -26,6 +27,7 @@ import sys
 
 import numpy as np
 
+from pong_rl.analysis.batch import run_all
 from pong_rl.analysis.rollouts import extrapolate, incoming_passes, load
 
 ALPHAS = (0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0)
@@ -121,25 +123,24 @@ def probe(path: Path, seed: int = 0) -> dict:
     return result
 
 
+def describe(row: dict) -> str:
+    m = row["probes"]["exit"]
+    return ("exit R2 " + ", ".join(f"{k} {v['r2']:.2f}" for k, v in m.items())
+            + f" | late (8+) memory R2 {m['memory'].get('r2_8_99', float('nan')):.2f}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rollouts", type=Path, default=Path("analysis/rollouts"))
     parser.add_argument("--match", default="", help="only recordings whose name contains this")
     parser.add_argument("--output", type=Path, default=Path("analysis/probes.jsonl"))
+    parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     paths = sorted(p for p in args.rollouts.glob("*.npz") if args.match in p.name and not p.name.endswith(".tmp.npz"))
     if not paths:
         sys.exit("no recordings found")
-    rows = []
-    for path in paths:
-        row = probe(path)
-        rows.append(row)
-        m = row["probes"]["exit"]
-        print(f"{path.stem}: exit R2 " + ", ".join(f"{k} {v['r2']:.2f}" for k, v in m.items())
-              + f" | late (8+) memory R2 {m['memory'].get('r2_8_99', float('nan')):.2f}", flush=True)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    print(f"Wrote {len(rows)} rows to {args.output}")
+    failures = run_all(probe, paths, args.output, "recording", args.workers, describe)
+    sys.exit(1 if failures else 0)
 
 
 if __name__ == "__main__":
