@@ -142,6 +142,18 @@ class PlayerTests(unittest.TestCase):
 
 
 
+class ProbeTests(unittest.TestCase):
+    def test_features_constant_on_training_games_do_not_blow_up(self):
+        probe = load_script("probe_memory")
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(200, 5))
+        y = X[:, 0] * 2 + rng.normal(scale=0.1, size=200)
+        X[:150, 4] = 0.0     # a dead unit on the training rows that fires on the test rows
+        X[150:, 4] = 5.0
+        predict = probe.fit(X[:150], y[:150], 1.0)
+        self.assertLess(np.abs(predict(X[150:]) - y[150:]).mean(), 0.5)
+
+
 def load_script(name):
     import importlib.util
     path = Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py"

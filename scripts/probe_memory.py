@@ -34,7 +34,8 @@ FOLDS = 5
 
 
 def fit(X, y, alpha):
-    mean, std = X.mean(0), X.std(0) + 1e-6
+    mean, std = X.mean(0), X.std(0)
+    std = np.where(std < 1e-4, np.inf, std)  # features constant on the training games (dead units) are dropped
     Z = (X - mean) / std
     ym = y.mean()
     beta = np.linalg.solve(Z.T @ Z + alpha * np.eye(Z.shape[1]), Z.T @ (y - ym))
