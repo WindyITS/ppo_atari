@@ -15,3 +15,6 @@ logs/
 videos/
 wandb/
 evaluations/
+
+# Analysis outputs (rollout recordings, probes, interventions)
+analysis/
