@@ -141,5 +141,38 @@ class PlayerTests(unittest.TestCase):
             player.close()
 
 
+
+def load_script(name):
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class AnalysisScriptTests(unittest.TestCase):
+    def test_recorder_view_and_memory_scripts_on_a_random_model(self):
+        record, views, memory = (load_script(n) for n in ("record_rollouts", "view_interventions",
+                                                          "memory_interventions"))
+        with tempfile.TemporaryDirectory() as folder:
+            path = make_checkpoint(Path(folder, "model.pt"), "lstm", use_fog=True, mask_enemy=False)
+            report = evaluate_checkpoint(path, episodes=1, seed=10_000, quiet=True)
+            recorded = record.record(str(path), 1, 10_000, saliency_every=10)
+            arrays = recorded["arrays"]
+            self.assertEqual(len(arrays["t"]), report["episodes"][0]["episode_length"])
+            self.assertEqual(recorded["meta"]["returns"], [report["episodes"][0]["episode_return"]])
+            self.assertEqual(arrays["h"].shape, (len(arrays["t"]), 128))
+            sampled = ~np.isnan(arrays["saliency_kl"][:, 0])
+            self.assertEqual(sampled.sum(), (arrays["t"] % 10 == 0).sum())
+            plain = views.run(str(path), "none", 1, 10_000)
+            self.assertEqual(plain["returns"], [report["episodes"][0]["episode_return"]])
+            result = memory.run(str(path), 1, 10_000, max_events=3)
+            self.assertEqual(len(result["events"]), 3)
+            self.assertEqual(set(result["totals"]), set(memory.BRANCHES))
+            for event in result["events"]:
+                self.assertTrue(set(event["outcomes"].values()) <= {"returned", "missed", "undecided"})
+
+
 if __name__ == "__main__":
     unittest.main()

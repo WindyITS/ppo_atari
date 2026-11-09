@@ -79,6 +79,10 @@ class Player:
     def clean_frame(self) -> np.ndarray:
         return np.array(self.env.get_wrapper_attr("clean_frame"), copy=True)
 
+    def scene_now(self) -> dict:
+        """Positions on the current unoccluded frame, and whether the ball is on the frame the model sees."""
+        return scene.locate(self.clean_frame(), self.obs[-1])
+
     @torch.inference_mode()
     def forward(self, obs: np.ndarray, state=None):
         """Policy outputs for an observation (stack, 84, 84) from a memory state, without side effects.

@@ -17,4 +17,4 @@ wandb/
 evaluations/
 
 # Analysis outputs (rollout recordings, probes, interventions)
-analysis/
+/analysis/
