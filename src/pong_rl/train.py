@@ -8,6 +8,7 @@ import json
 import math
 import os
 import random
+import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -38,6 +39,10 @@ LEARNING_RATE = {"cnn": 1e-3, "lstm": 1e-3, "attn_lstm": 1e-3, "vit": 2.5e-4, "v
 # Milestones in aggregate environment steps. A from-scratch run saves its untrained weights at 0;
 # a fine-tuning run saves its starting (parent) weights and then every later milestone.
 CHECKPOINT_STEPS = (0, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 7_500_000, 10_000_000, 11_000_000, 12_000_000, 13_000_000, 14_000_000, 15_000_000)
+# Extra milestones for runs that go past 15M steps (e.g. a fine-tune with a 15M budget ends at 25M).
+LONG_RUN_CHECKPOINT_STEPS = (17_500_000, 20_000_000, 22_500_000, 25_000_000, 30_000_000)
+# Top-level agent modules --reinit may reset to fresh (seeded) weights when fine-tuning.
+REINIT_MODULES = ("network", "encoder", "lstm", "actor", "critic", "keys", "values", "query")
 CONDITION_LABELS = {(False, False): "clean", (False, True): "mask", (True, False): "fog", (True, True): "fog_mask"}
 
 
@@ -75,6 +80,8 @@ class Args:
     save_model: bool = True
     report_window_steps: int = 500_000
     init_from: str | None = None
+    run_tag: str | None = None  # appended to the run folder name, so a variant never shares files with a run
+    reinit: tuple[str, ...] = ()  # modules of the parent re-initialised before fine-tuning
 
     # Algorithm specific arguments
     env_id: str = "ALE/Pong-v5"
@@ -123,6 +130,12 @@ def parse_args() -> Args:
                         help="target aggregate environment step; a fine-tune continues its parent's step count")
     parser.add_argument("--init-from", type=str, default=None,
                         help="checkpoint to fine-tune from (same --arch); fresh Adam, LR annealed over the fine-tune")
+    parser.add_argument("--run-tag", type=str, default=None,
+                        help="suffix for the run folder (letters, digits, '.', '-', '_'), e.g. a 15M-budget "
+                             "fine-tune: finetune/lstm/clean_10.0M_to_fog_mask__ft15M/seed_1")
+    parser.add_argument("--reinit", nargs="+", choices=REINIT_MODULES, default=(),
+                        help="with --init-from: re-initialise these top-level modules (fresh weights seeded by "
+                             "--seed) and load the rest from the parent")
     parser.add_argument("--learning-rate", type=float, default=None,
                         help="initial Adam learning rate, annealed over the run; default depends on --arch: "
                              + ", ".join(f"{arch} {lr:g}" for arch, lr in LEARNING_RATE.items()))
@@ -162,6 +175,10 @@ def parse_args() -> Args:
         parser.error("--target-kl must be finite and positive")
     if parsed.replay_checkpoint_threshold < 0:
         parser.error("--replay-checkpoint-threshold must be nonnegative")
+    if parsed.run_tag is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+", parsed.run_tag):
+        parser.error("--run-tag may only contain letters, digits, '.', '-' and '_'")
+    if parsed.reinit and parsed.init_from is None:
+        parser.error("--reinit needs --init-from")
 
     return Args(
         exp_name=parsed.exp_name,
@@ -186,6 +203,8 @@ def parse_args() -> Args:
         save_model=parsed.save_model,
         report_window_steps=parsed.report_window_steps,
         init_from=parsed.init_from,
+        run_tag=parsed.run_tag,
+        reinit=tuple(parsed.reinit),
     )
 
 
@@ -262,10 +281,19 @@ def main():
     initial_checkpoint = parent["checkpoint_step"] if parent and parent["checkpoint_step"] is not None else start_step
     # The folder names the parent checkpoint, so fine-tunes from different parents never share files.
     run_label = f"{parent['condition_label']}_{step_label(initial_checkpoint)}_to_{label}" if parent else label
+    if args.run_tag:
+        run_label = f"{run_label}__{args.run_tag}"
+    if args.reinit:
+        if parent is None:
+            raise ValueError("reinit needs a parent checkpoint (init_from)")
+        parent["reinit"] = sorted(args.reinit)
     if start_step >= args.total_timesteps:
         raise ValueError(f"--total-timesteps ({args.total_timesteps}) must exceed the starting step ({start_step})")
     run = {"dir": f"{kind}/{args.arch}/{run_label}/seed_{args.seed}", "kind": kind,
            "condition": condition, "start_step": start_step, "init_from": parent}
+    if args.save_model and (Path("checkpoints") / run["dir"] / "final.pt").exists():
+        # Never overwrite a finished run's checkpoints: a variant needs its own --run-tag.
+        raise ValueError(f"checkpoints/{run['dir']} already holds a finished run; choose a --run-tag")
     tag = f"{kind}_{args.arch}_{run_label}"
     started = int(time.time())
     run_name = f"{tag}__seed_{args.seed}__{started}"
@@ -324,7 +352,16 @@ def main():
     assert envs.single_observation_space.shape is not None
 
     agent = make_agent(args.arch, envs).to(device)
-    if parent_state is not None:
+    if parent_state is not None and args.reinit:
+        unknown = [name for name in args.reinit if not isinstance(getattr(agent, name, None), torch.nn.Module)]
+        if unknown:
+            raise ValueError(f"--reinit: {args.arch} has no module {', '.join(unknown)}")
+        # The agent was just built after seeding, so the skipped modules keep fresh, seeded weights.
+        kept = {key: value for key, value in parent_state.items() if key.split(".")[0] not in args.reinit}
+        missing, unexpected = agent.load_state_dict(kept, strict=False)
+        if unexpected or any(key.split(".")[0] not in args.reinit for key in missing):
+            raise ValueError("parent checkpoint does not match the agent outside the re-initialised modules")
+    elif parent_state is not None:
         agent.load_state_dict(parent_state, strict=True)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
@@ -347,7 +384,7 @@ def main():
     iteration = 0
     global_step = start_step
     optimizer_steps = 0
-    pending_checkpoints = iter(step for step in CHECKPOINT_STEPS
+    pending_checkpoints = iter(step for step in (*CHECKPOINT_STEPS, *LONG_RUN_CHECKPOINT_STEPS)
                                if initial_checkpoint < step <= args.total_timesteps)
     next_checkpoint = next(pending_checkpoints, None)
     try:
