@@ -6,6 +6,7 @@
 #   reinit_core  lstm, the parent's convolutional encoder with a fresh LSTM, actor and critic
 # Runs go to their own tagged folders (e.g. checkpoints/finetune/lstm/clean_10.0M_to_fog_mask__ft15M/seed_1);
 # training refuses to start in a folder that already holds final.pt, so no existing checkpoint is touched.
+# Rerunning the script skips finished runs and resumes interrupted ones from their latest milestone.
 # Usage (on the training host, from the repository root):
 #   nohup bash scripts/run_controls.sh > logs/controls.log 2>&1 &
 set -euo pipefail
@@ -19,7 +20,15 @@ launch() {  # launch <arch> <seed> <tag> [extra args...]
   local run="finetune/${arch}/clean_10.0M_to_fog_mask__${tag}/seed_${seed}"
   if [[ -f "checkpoints/${run}/final.pt" ]]; then echo "Skipping ${run} (finished)"; return; fi
   if [[ -e "checkpoints/${run}" ]]; then
-    echo "Refusing to restart ${run}: unfinished folder exists; inspect it by hand" >&2; return
+    # Interrupted (e.g. a power cut): continue from the latest milestone with --resume, which keeps the
+    # folder, step counter and learning-rate schedule and never rewrites an existing file.
+    local latest
+    latest="$(ls "checkpoints/${run}"/step_*.pt 2>/dev/null | sort | tail -n 1)"
+    if [[ -z "${latest}" ]]; then echo "No milestone to resume ${run} from; inspect it by hand" >&2; return; fi
+    echo "Resuming ${run} from ${latest}"
+    echo "=== resumed from ${latest} at $(date -Is) ===" >> "logs/${run}/train.log"
+    uv run pong-rl --resume "${latest}" >> "logs/${run}/train.log" 2>&1 &
+    return
   fi
   mkdir -p "logs/${run}"
   echo "Launching ${run}"
