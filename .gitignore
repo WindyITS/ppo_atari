@@ -18,3 +18,9 @@ evaluations/
 
 # Analysis outputs (rollout recordings, probes, interventions)
 /analysis/
+
+# Personal notes on paper
+personal_notes/
+
+
+
