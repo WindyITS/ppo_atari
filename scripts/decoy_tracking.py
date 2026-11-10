@@ -4,14 +4,17 @@
 
 E5 showed that mirroring or erasing the enemy paddle wrecks every fog-trained agent. This asks what the agent
 does with the mirrored cue. On the plain view the enemy paddle follows the ball (under fog the ball's hidden
-height and the enemy paddle correlate at r 0.94-0.96), so the two cues cannot be told apart; the mirror
-(enemy row r shown at row 90 - r) separates them. For every incoming pass through the agent's half
-(pong_rl.analysis.rollouts.incoming_passes) the agent's paddle height when the ball reaches the paddle line is
-regressed on two cues, both standardised:
+height and the enemy paddle correlate at r 0.94-0.96), so the two cues cannot be told apart. The mirror
+(enemy row r shown at row 90 - r) turns the cue upside down: the enemy paddle as seen becomes strongly
+anti-correlated with the ball, so the two cues predict opposite paddle positions. For every incoming pass
+through the agent's half (pong_rl.analysis.rollouts.incoming_passes), at the step the ball reaches the paddle
+line, the agent's paddle height is compared with
     ball     the true height where the ball meets the paddle line
     enemy    the enemy paddle's height as the model saw it at that moment (mirrored under mirror_enemy)
-A policy that reads the ball's height off the enemy paddle follows the enemy cue under the mirror; one that
-tracks the ball (seen, or remembered) keeps following the ball. Also reported: the share of passes returned.
+through correlations and median distances. A policy that reads the ball's height off the enemy paddle follows
+the enemy cue under the mirror (corr_ball turns negative); one that tracks the ball keeps corr_ball positive.
+(The cues are near-collinear in both conditions, so a joint regression on both is not identifiable.) Also
+reported: the share of passes not followed by a lost point within 20 steps.
 
 Checkpoints: finals trained on fog and on clean (the transform does nothing on masked views). Each plays
 --episodes games (env seeds --seed, --seed + 1, ...) under none and mirror_enemy. Output: JSON lines (default
@@ -60,15 +63,6 @@ def play(path: str, transform: str, episodes: int, seed: int) -> tuple[dict, Pla
     return {"arrays": arrays, "returns": returns}, player
 
 
-def regress(agent, cues: dict) -> dict:
-    """Standardised least-squares weights of the agent's paddle height on the cues, plus R^2."""
-    X = np.column_stack([(c - c.mean()) / (c.std() + 1e-9) for c in cues.values()])
-    y = agent - agent.mean()
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-    r2 = 1 - ((y - X @ beta) ** 2).sum() / (y ** 2).sum() if (y ** 2).sum() > 0 else float("nan")
-    return {**{name: float(b) for name, b in zip(cues, beta)}, "r2": float(r2)}
-
-
 def analyse(job: str, episodes: int, seed: int) -> dict:
     path, transform = job.split("::")
     torch.set_num_threads(1)
@@ -98,7 +92,6 @@ def analyse(job: str, episodes: int, seed: int) -> dict:
         row["corr_ball"] = float(np.corrcoef(agent, ball)[0, 1])
         row["corr_enemy"] = float(np.corrcoef(agent, enemy)[0, 1])
         row["corr_ball_enemy"] = float(np.corrcoef(ball, enemy)[0, 1])
-        row["weights"] = regress(agent, {"ball": ball, "enemy": enemy})
         row["gap_ball"] = float(np.median(np.abs(agent - ball)))
         row["gap_enemy"] = float(np.median(np.abs(agent - enemy)))
     return row
@@ -114,9 +107,11 @@ def default_checkpoints(root: Path) -> list[Path]:
 
 
 def describe(row: dict) -> str:
-    w = row.get("weights", {})
-    return (f"return {row['mean_return']:+.1f}, {row['passes']} passes, weights ball {w.get('ball', float('nan')):+.2f} "
-            f"enemy {w.get('enemy', float('nan')):+.2f} (R2 {w.get('r2', float('nan')):.2f})")
+    nan = float("nan")
+    return (f"return {row['mean_return']:+.1f}, {row['passes']} passes, corr paddle-ball "
+            f"{row.get('corr_ball', nan):+.2f}, paddle-enemy cue {row.get('corr_enemy', nan):+.2f}, "
+            f"ball-cue {row.get('corr_ball_enemy', nan):+.2f}; gaps {row.get('gap_ball', nan):.1f} / "
+            f"{row.get('gap_enemy', nan):.1f} px")
 
 
 def main():
