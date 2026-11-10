@@ -11,18 +11,22 @@ CNN, LSTM and attention-LSTM agents learn to play"). Runs interrupted by power c
    fog-trained agent (all three architectures, scratch and fine-tuned) loses every point if the enemy paddle
    is erased or mirrored, and most points if it is moved by only 4 px. It does not copy the paddle's height;
    it reads something finer from it, plausibly where the ball met it (which sets the return angle).
-2. **With nothing visible to go on (fog + mask), the LSTM remembers the ball.** Its memory holds the hidden
+2. **With nothing visible to go on (fog + mask), the memory agents remember the ball.** Its memory holds the hidden
    ball's height (R^2 0.87-0.97 deep into the fog) and wiping it as the ball disappears drops returns from 0.98
    to 0.30. Its slowest memory units forget over 8-18 steps, about the 14 steps the ball is hidden.
-3. **The memoryless CNN wins fog + mask by committing early.** It moves while the ball is still visible and
+3. **The attention-LSTM remembers only what its attention let in.** Blocking its attention to the ball while the
+   ball is still visible, before the fog, wipes the ball from its memory and makes it miss most balls (3 of 4
+   models); the same block placed elsewhere does nothing. In 2 of the 4, the block does as much damage as
+   erasing the ball from the screen.
+4. **The memoryless CNN wins fog + mask by committing early.** It moves while the ball is still visible and
    holds its paddle there; the paddle itself carries the information through the fog. Wiping its frame stack
    changes nothing.
-4. **Clean models differ in what they look at.** The clean CNN ignores the enemy paddle entirely; the clean
+5. **Clean models differ in what they look at.** The clean CNN ignores the enemy paddle entirely; the clean
    attention-LSTM's heads stare at it and it collapses without it; the clean LSTM sits in between.
-5. **Fine-tuning from the clean model does not hurt.** The earlier failure on fog + mask came from the short
+6. **Fine-tuning from the clean model does not hurt.** The earlier failure on fog + mask came from the short
    fine-tuning recipe: given the scratch budget and learning-rate schedule, every fine-tune wins, the LSTM's
    mostly faster than from scratch and the CNN's more reliably.
-6. **Every model is a specialist.** Fog + mask models lose on every other view, clean ones on every fogged one.
+7. **Every model is a specialist.** Fog + mask models lose on every other view, clean ones on every fogged one.
 
 ## Setup in one paragraph
 
@@ -119,6 +123,38 @@ into the agent's half (per seed):
 - The fog + mask CNN still carries some of the ball (0.40-0.57) with no memory and the ball out of its stack;
   its own paddle, already moving towards the right height, is the likely carrier (E8).
 
+**E3b, untrained-network control** (`scripts/random_control.py`): the same games replayed while every frame is
+also fed to a randomly initialised network of the same architecture, which keeps its own memory. Its state
+decodes the hidden ball as well as the trained models' under fog (0.92-0.99) and as well as the fog + mask
+CNN's (0.39-0.55): those decodings come from the input (the enemy paddle; the CNN's own committed paddle).
+**Only the fog + mask memory agents beat it**: trained memory 0.87-0.98 against 0.27-0.58 untrained (LSTM and
+attention-LSTM); the failed LSTM fine-tunes 0.43-0.61 against 0.05-0.11.
+
+**E10, does the attention-LSTM remember only what it looked at?** (`scripts/attention_block.py`). Each flight
+towards the agent is replayed from a snapshot while, as long as the ball is visible before the fog, the agent
+may not attend to the 3x3 attention cells around the ball (neither paddle's cells are ever blocked); a sham
+branch blocks the same number of cells at the mirrored height, and a third erases the ball from the screen.
+The probe is fit on the model's own recorded games and applied to the replays (new game seeds).
+
+| attention-LSTM on fog + mask | balls returned: control / ball blocked / sham / ball erased | memory error on the hidden ball, px: control / blocked / sham / erased |
+|---|---|---|
+| fine-tune s1 | 0.99 / **0.06** / 0.99 / 0.10 | 1.2 / **32.0** / 2.4 / 21.9 |
+| fine-tune s2 | 0.95 / **0.14** / 0.96 / 0.14 | 0.7 / **9.4** / 0.8 / 22.1 |
+| fine-tune s3 | 1.00 / 1.00 / 1.00 / 0.04 | 0.4 / 2.9 / 0.5 / 10.6 |
+| scratch s2 | 0.97 / **0.54** / 0.97 / 0.04 | 1.4 / **18.6** / 1.9 / 27.4 |
+
+- **Memory holds what attention let in.** Blocking attention to the ball leaves memory without it and the
+  agent misses (3 of 4 models), while the sham block changes nothing: the effect is specific to the ball.
+- In fine-tunes s1 and s2 the block is as damaging as erasing the ball altogether: attention is the whole gate
+  to memory. In the other two, part of the ball still gets past the block (fine-tune s3 loses nothing with
+  the block and everything with the erasure), plausibly through neighbouring cells whose receptive fields
+  cover the ball.
+- With the enemy paddle visible (fog), the attention block mostly matters less (0 to -0.23 of returns in 4 of
+  5 models), yet erasing the ball still hurts every fog model (attention-LSTM 0.20-0.49, LSTM 0.48-0.95 of
+  balls returned): even with the shortcut, the agents also use the ball they saw.
+- Passive correlation (attention on the ball before the fog against memory error inside it) shows no
+  consistent relation (Spearman -0.12 to +0.50): only the intervention is informative.
+
 ## Q2 Perception and Q3 the enemy-paddle shortcut
 
 **E5, decoy** (`scripts/view_interventions.py`): whole evaluation games in which the model sees the enemy
@@ -163,6 +199,11 @@ paddle mirrored top to bottom or erased; the game itself is unchanged. Mean retu
   it). That fits the sign, but is not yet tested directly.
 - E5b, which tried to read the same thing from correlations under the mirror, was inconclusive (too few and
   too noisy passes per game).
+- **E11, scripted players** (`scripts/scripted_baselines.py`, the same 30 games; the CPU wins long rallies, so
+  the measure is the share of balls returned): copying the enemy paddle returns 0.55 under fog, going to the
+  ball's last seen height 0.66, extrapolating its seen path (ideal short memory) 0.88, and the same with no fog
+  0.96. The shortcut alone is strong but not enough; the fog + mask LSTM (0.98) beats ideal extrapolation and
+  the memoryless CNN (0.88) matches it.
 
 ## Q5 Strategy
 
@@ -229,6 +270,7 @@ return after k M steps on fog + mask (per seed):
 
 Scripts (all in `scripts/`, outputs under `analysis/` on the host): `record_rollouts.py` (E2),
 `memory_interventions.py` (E4), `view_interventions.py` (E5), `decoy_tracking.py` (E5b), `enemy_shift.py`
-(E5c), `probe_memory.py` (E3),
+(E5c), `probe_memory.py` (E3), `random_control.py` (E3b), `attention_block.py` (E10), `scripted_baselines.py`
+(E11),
 `summarize_rollouts.py` (E7-E9), `run_controls.sh` (E6), `report_tables.py` (all tables). Interrupted
 training runs continue with `pong-rl --resume <milestone checkpoint>`; the analyses skip finished work.
