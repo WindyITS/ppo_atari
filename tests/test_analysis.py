@@ -170,6 +170,28 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(finished(output, "recording"), {str(p) for p in paths if p.stem != "bad"})
 
 
+class EnemyShiftTests(unittest.TestCase):
+    def test_shift_moves_only_the_enemy_paddle_and_branches_replay(self):
+        shift = load_script("enemy_shift")
+        clean = np.full((84, 84), 87, np.uint8)
+        clean[40:42, 50] = 236
+        clean[20:28, 8:11] = 236
+        clean[60:68, 73:76] = 236
+        moved = scene.locate(shift.shift_enemy(clean, 6))
+        self.assertEqual((moved["enemy_y"], moved["ball_y"], moved["agent_y"]), (29.5, 40.5, 63.5))
+        self.assertEqual(scene.locate(shift.shift_enemy(clean, -4))["enemy_y"], 19.5)
+        stack = np.stack([clean] * 4)
+        self.assertEqual(shift.shift_enemy(stack, 3).shape, (4, 84, 84))
+        with tempfile.TemporaryDirectory() as folder:
+            path = make_checkpoint(Path(folder, "model.pt"), "lstm", use_fog=True, mask_enemy=False)
+            row = shift.run(path, episodes=1, seed=10_000, max_events=3)
+            self.assertEqual(row["events"], 3)
+            self.assertEqual(set(row["return_rate"]), {f"shift_{d}" for d in shift.SHIFTS} | {"control_b"})
+            masked = make_checkpoint(Path(folder, "masked.pt"), "cnn", use_fog=True, mask_enemy=True)
+            with self.assertRaisesRegex(ValueError, "masked"):
+                shift.run(masked, episodes=1, seed=10_000, max_events=1)
+
+
 class ProbeTests(unittest.TestCase):
     def test_features_constant_on_training_games_do_not_blow_up(self):
         probe = load_script("probe_memory")
