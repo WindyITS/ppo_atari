@@ -12,13 +12,18 @@ the ball starts towards the agent, the game is saved and the flight is replayed 
                  1-5, between the paddles, so neither paddle's cells are ever blocked)
     block_sham   the same 3x3 block at the vertically mirrored height (moved further if it would overlap the
                  ball's block): as much attention removed, but not from the ball
+    erase_ball   over the same steps, the ball is painted out of the frame the model sees (its 1-pixel-padded
+                 box): nothing about the ball reaches the network at all. Compared with block_ball it measures
+                 how much of the ball still gets past the attention block; run also on the plain lstm (which
+                 has only control, control_b and erase_ball) as a reference without attention
 All branches except control_b share one action seed. Per branch: whether the ball is returned (as in
 scripts/memory_interventions.py) and how well a linear probe reads the hidden ball's height from memory while
 the ball is in the agent's half and hidden. The probe (ridge on [h, c] -> ball height, penalty chosen by
 game-grouped cross-validation) is fit on the checkpoint's own recording (scripts/record_rollouts.py, same
 steps: hidden ball inside the agent's half). In the control branch the script also records how much attention
 went to the ball's own cell while it was visible, for the correlational version of the question.
-Output: JSON lines (default analysis/attention_block.jsonl), one row per checkpoint; reruns skip done rows.
+Output: JSON lines (default analysis/attention_block_v2.jsonl; analysis/attention_block.jsonl holds the first
+run, attn_lstm only, without erase_ball), one row per checkpoint; reruns skip done rows.
 """
 
 import argparse
@@ -34,6 +39,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from pong_rl.analysis import scene  # noqa: E402
 from pong_rl.analysis.batch import run_all  # noqa: E402
 from pong_rl.analysis.player import Player  # noqa: E402
 from pong_rl.analysis.rollouts import WINDOW_END, WINDOW_START, incoming_passes, load  # noqa: E402
@@ -42,7 +48,22 @@ GRID, CELL = 7, 12
 BLOCK_COLUMNS = (1, 5)  # attention-grid columns strictly between the paddles (enemy: 0, agent: 6)
 ALPHAS = (0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0)
 PADDLE_X, RETURN_X, MAX_STEPS = 70.0, 40.0, 150
-BRANCHES = ("control", "control_b", "block_ball", "block_sham")
+BRANCHES = ("control", "control_b", "block_ball", "block_sham", "erase_ball")
+LSTM_BRANCHES = ("control", "control_b", "erase_ball")
+
+
+def branches_for(arch: str) -> tuple:
+    return BRANCHES if arch == "attn_lstm" else LSTM_BRANCHES
+
+
+def erase_ball(obs: np.ndarray) -> np.ndarray:
+    """The observation with the ball painted out of every frame (box padded by 1 pixel)."""
+    out = obs.copy()
+    for frame in out.reshape(-1, *out.shape[-2:]):
+        box = scene.ball_box(frame, pad=1)
+        if box is not None:
+            frame[box] = scene.PONG_BG_VALUE
+    return out
 
 
 def block_around(row: int, col: int) -> np.ndarray:
@@ -116,8 +137,10 @@ def play_branch(player: Player, branch: str, probe) -> dict:
             return {"outcome": "undecided", "errors": errors, "truth": truth, "preds": preds, "looked": looked}
         where = player.scene_now()
         x, y = where["ball_x"], where["ball_y"]
-        blocked = None
+        blocked, transform = None, None
         before_fog = x == x and x < WINDOW_START
+        if before_fog and branch == "erase_ball":
+            transform = erase_ball
         if before_fog and branch in ("block_ball", "block_sham"):
             row, col = ball_cell(x, y)
             blocked = block_around(row if branch == "block_ball" else sham_row(row), col)
@@ -125,8 +148,8 @@ def play_branch(player: Player, branch: str, probe) -> dict:
             reached = True
         if reached and x == x and previous_x is not None and x < previous_x and x < RETURN_X:
             return {"outcome": "returned", "errors": errors, "truth": truth, "preds": preds, "looked": looked}
-        step = player.step(blocked=blocked)
-        if before_fog and branch == "control":
+        step = player.step(transform=transform, blocked=blocked)
+        if before_fog and branch == "control" and "attention" in step.internals:
             row, col = ball_cell(x, y)
             looked.append(float(step.internals["attention"][:, row * GRID + col].sum()))
         inside = x == x and WINDOW_START <= x < WINDOW_END and not where["visible"] and not reached
@@ -171,7 +194,7 @@ def run(path: Path, episodes: int, seed: int, max_events: int, rollouts: Path) -
                     saved = player.save()
                     branch_seed = zlib.crc32(f"{seed + game}:{player.t}".encode())
                     outcomes = {}
-                    for branch in BRANCHES:
+                    for branch in branches_for(player.arch):
                         player.load(saved, reseed=branch_seed + (1 if branch == "control_b" else 0))
                         outcomes[branch] = play_branch(player, branch, probe)
                     player.load(saved)
@@ -185,7 +208,8 @@ def run(path: Path, episodes: int, seed: int, max_events: int, rollouts: Path) -
 
 def summarize(path, player, events, probe_r2, recording, episodes, seed) -> dict:
     per_branch = {}
-    for b in BRANCHES:
+    names = branches_for(player.arch)
+    for b in names:
         outcomes = [e["outcomes"][b]["outcome"] for e in events]
         decided = [o for o in outcomes if o != "undecided"]
         truth = np.concatenate([e["outcomes"][b]["truth"] for e in events]) if events else np.array([])
@@ -195,7 +219,7 @@ def summarize(path, player, events, probe_r2, recording, episodes, seed) -> dict
                          "probe_r2": r2(truth, preds) if len(truth) > 20 else None, "hidden_steps": int(len(truth))}
     # paired per-event differences against control (events where both have hidden steps)
     paired = {}
-    for b in ("control_b", "block_ball", "block_sham"):
+    for b in names[1:]:
         d = [np.mean(e["outcomes"][b]["errors"]) - np.mean(e["outcomes"]["control"]["errors"])
              for e in events if e["outcomes"][b]["errors"] and e["outcomes"]["control"]["errors"]]
         r = [(e["outcomes"][b]["outcome"] == "returned") - (e["outcomes"]["control"]["outcome"] == "returned")
@@ -230,9 +254,10 @@ def spearman(a: np.ndarray, b: np.ndarray) -> float:
 
 def default_checkpoints(root: Path) -> list[Path]:
     found = []
-    for view in ("fog_mask", "fog"):
-        found += root.glob(f"scratch/attn_lstm/{view}/seed_*/final.pt")
-        found += root.glob(f"finetune/attn_lstm/clean_10.0M_to_{view}/seed_*/final.pt")
+    for arch in ("attn_lstm", "lstm"):
+        for view in ("fog_mask", "fog"):
+            found += root.glob(f"scratch/{arch}/{view}/seed_*/final.pt")
+            found += root.glob(f"finetune/{arch}/clean_10.0M_to_{view}/seed_*/final.pt")
     return sorted(found)
 
 
@@ -255,7 +280,7 @@ def main():
     parser.add_argument("--seed", type=int, default=20_000)
     parser.add_argument("--max-events", type=int, default=20, help="per game")
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--output", type=Path, default=Path("analysis/attention_block.jsonl"))
+    parser.add_argument("--output", type=Path, default=Path("analysis/attention_block_v2.jsonl"))
     args = parser.parse_args()
     paths = [p.resolve().relative_to(Path.cwd()) if p.is_absolute() else p
              for p in (args.checkpoints or default_checkpoints(args.root))]

@@ -219,6 +219,14 @@ class AttentionBlockScriptTests(unittest.TestCase):
             row = block.run(path, episodes=1, seed=20_000, max_events=3, rollouts=rollouts)
             self.assertEqual(row["events"], 3)
             self.assertEqual(set(row["branches"]), set(block.BRANCHES))
+            self.assertEqual(block.branches_for("lstm"), ("control", "control_b", "erase_ball"))
+        frame = np.full((1, 84, 84), 87, np.uint8)
+        frame[0, 40:42, 30] = 236
+        frame[0, 20:28, 8:11] = 236
+        erased = block.erase_ball(frame)
+        self.assertTrue(np.isnan(scene.locate(erased[0])["ball_x"]))
+        self.assertEqual(scene.locate(erased[0])["enemy_y"], 23.5)
+        self.assertEqual(frame[0, 40, 30], 236)  # input untouched
 
 
 class RandomControlTests(unittest.TestCase):
