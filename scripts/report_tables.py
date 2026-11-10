@@ -192,10 +192,64 @@ def main():
                 print(f"- {r['train_view']} {kind_of(r)} s{seed_of(r)} (return {r['mean_return']:+.1f}): "
                       + ", ".join(f"{k} {v}" for k, v in a.items() if k != "uniform"))
 
+    # E5b decoy tracking
+    tracking = read_jsonl(args.analysis / "decoy_tracking.jsonl")
+    if tracking:
+        print("\n## E5b decoy tracking: correlation of the agent's paddle (when the ball reaches it) with the ball's "
+              "height / with the enemy cue as seen; per seed\n")
+        print("| arch | view | kind | transform | return | passes | corr paddle-ball | corr paddle-enemy cue | corr ball-cue |"
+              "\n|---|---|---|---|---|---|---|---|---|")
+        by = collections.defaultdict(list)
+        for r in tracking:
+            by[(r["arch"], r["train_view"], r["kind"], r["transform"])].append(r)
+        table = []
+        for key in sorted(by):
+            rs = sorted(by[key], key=lambda r: seed_of(r) or 0)
+
+            def cells(k):
+                return " / ".join(fmt(r.get(k)) for r in rs)
+            print(f"| {' | '.join(key)} | {np.mean([r['mean_return'] for r in rs]):+.1f} | "
+                  f"{' / '.join(str(r['passes']) for r in rs)} | {cells('corr_ball')} | {cells('corr_enemy')} | "
+                  f"{cells('corr_ball_enemy')} |")
+            table.append({"arch": key[0], "view": key[1], "kind": key[2], "transform": key[3],
+                          **{k: [r.get(k) for r in rs] for k in ("mean_return", "passes", "corr_ball", "corr_enemy",
+                                                                 "corr_ball_enemy", "gap_ball", "gap_enemy")}})
+        report["decoy_tracking"] = table
+
+    # E6 training controls: fog_mask return after k M steps on fog_mask, scratch vs each kind of fine-tune
     controls = read_jsonl(args.evaluations / "controls_stochastic.jsonl")
     if controls:
-        report["controls"] = [{"run": r["run"], "file": r["checkpoint_file"], "mean_return": r["summary"]["mean_return"],
-                               "win_rate": r["summary"]["completed_win_rate"]} for r in controls]
+        curves = collections.defaultdict(dict)
+        for r in sweep + controls:
+            if r["train_view"] != "fog_mask" or r["eval_view"] != "fog_mask" or r["arch"] == "attn_lstm":
+                continue
+            step = r["checkpoint_step"] if r["checkpoint_step"] is not None else r["training_target_timesteps"]
+            run = r["run"].split("/")
+            if r["role"] == "scratch":
+                label, k = "scratch (15M)", step
+            elif r["role"] == "finetune":
+                label = run[2].split("__", 1)[1] if "__" in run[2] else "finetune (5M)"
+                k = step - 10_000_000
+            else:
+                continue
+            curves[(r["arch"], label)].setdefault(k / 1e6, {})[r["training_seed"]] = r["summary"]["mean_return"]
+        ks = sorted({k for c in curves.values() for k in c})
+        print("\n## E6 fog_mask return after k M steps on fog_mask (mean over seeds; per seed below)\n")
+        print("| arch | run | " + " | ".join(f"{k:g}M" for k in ks) + " |\n|---|---|" + "---|" * len(ks))
+        table = []
+        for (arch, label), c in sorted(curves.items()):
+            cells = []
+            for k in ks:
+                v = c.get(k)
+                cells.append(f"{np.mean(list(v.values())):+.1f}" if v else "")
+            print(f"| {arch} | {label} | " + " | ".join(cells) + " |")
+            table.append({"arch": arch, "run": label,
+                          "points": {f"{k:g}": [c[k].get(s) for s in (1, 2, 3)] for k in ks if k in c}})
+        for row in table:
+            print(f"- {row['arch']} {row['run']}: " + "; ".join(
+                f"{k}M " + "/".join(fmt(v, 1) if v is not None else "–" for v in vals)
+                for k, vals in row["points"].items()))
+        report["controls"] = table
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, default=float) + "\n")
 
