@@ -28,6 +28,7 @@ Rules: never delete or overwrite existing code or checkpoints; new runs use tagg
 | E3 | Q4 | Linear probes: decode the hidden ball's height (now and where it will reappear) from LSTM state / CNN features, against baselines | `analysis/probes.json` |
 | E4 | Q4 | Causal memory tests from saved emulator states: wipe the LSTM state when the ball enters the fog (or replace the CNN's older frames by the current one), replay the same point, compare return rates | `analysis/interventions/` |
 | E5 | Q3 | Enemy-paddle decoy: play full games where the enemy paddle the agent sees is mirrored vertically (or frozen); compare with the plain and masked views | `analysis/decoy.jsonl` |
+| E5b | Q3 | Decoy tracking: under the mirrored enemy paddle, regress the agent's paddle height at the paddle line on the ball's true height and on the enemy paddle as seen | `analysis/decoy_tracking.jsonl` |
 | E6 | Q6 | Training controls on fog + mask from the clean 10M parents, 15M-step budget and schedule matched to scratch: `ft15M` (cnn, lstm) and `reinit_core` (lstm, fresh LSTM and heads on the clean encoder) | `checkpoints/finetune/*/clean_10.0M_to_fog_mask__*` |
 | E7 | Q2 | Perturbation saliency per object (blur each object, measure policy change); attention maps of `attn_lstm` per object | `analysis/saliency.json` |
 | E8 | Q5 | Behaviour statistics from E2: paddle movement while the ball is hidden, hit offsets, rally lengths | `analysis/behaviour.json` |

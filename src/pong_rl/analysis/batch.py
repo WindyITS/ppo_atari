@@ -22,10 +22,10 @@ def finished(output: Path, key: str) -> set[str]:
     return done
 
 
-def run_all(function: Callable[[Path], dict], paths: list[Path], output: Path, key: str, workers: int,
+def run_all(function: Callable, paths: list, output: Path, key: str, workers: int,
             describe: Callable[[dict], str] = lambda row: "") -> int:
-    """Apply function to every path whose str is not yet in output (rows identified by row[key]); returns
-    the number of failures."""
+    """Apply function to every job (a recording path, or any job whose str names it) whose str is not yet in
+    output (rows identified by row[key] == str(job)); returns the number of failures."""
     done = finished(output, key)
     todo = [p for p in paths if str(p) not in done]
     print(f"{len(paths) - len(todo)} already done, {len(todo)} to do", flush=True)
@@ -39,13 +39,14 @@ def run_all(function: Callable[[Path], dict], paths: list[Path], output: Path, k
         futures = {pool.submit(function, p): p for p in todo}
         for count, future in enumerate(concurrent.futures.as_completed(futures), 1):
             path = futures[future]
+            name = getattr(path, "stem", path)
             try:
                 row = future.result()
             except Exception as exc:  # keep going; the failed recording is retried on the next run
                 failures += 1
-                print(f"[{count}/{len(todo)}] {path.stem}: FAILED {exc!r}", file=sys.stderr, flush=True)
+                print(f"[{count}/{len(todo)}] {name}: FAILED {exc!r}", file=sys.stderr, flush=True)
                 continue
             stream.write(json.dumps(row) + "\n")
             stream.flush()
-            print(f"[{count}/{len(todo)}] {path.stem}: {describe(row)}", flush=True)
+            print(f"[{count}/{len(todo)}] {name}: {describe(row)}", flush=True)
     return failures
