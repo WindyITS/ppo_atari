@@ -267,7 +267,8 @@ class AttentionLSTMAgent(RecurrentAgent):
          initialisation; without this the weights stay uniform and the agent cannot learn where to look.
       5. The weighted sums of values, concatenated over heads, are the LSTM's only input.
     get_states_and_attention also returns the weights, shaped (T * batch, heads, 49), cells in
-    row-major order (row = y, column = x).
+    row-major order (row = y, column = x). Its optional `blocked` (bool, (T * batch, 49)) removes cells from
+    every head's softmax (an analysis intervention: the agent cannot look there); None changes nothing.
     """
 
     def __init__(self, envs: gym.vector.VectorEnv, heads: int = ATTENTION_HEADS,
@@ -293,7 +294,8 @@ class AttentionLSTMAgent(RecurrentAgent):
         self.critic = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, 1), std=1.0)
 
     def get_states_and_attention(
-        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None
+        self, x: torch.Tensor, lstm_state: LSTMState, done: torch.Tensor | None,
+        blocked: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, LSTMState, torch.Tensor]:
         """Per-step LSTM outputs (T * batch, hidden), the final (h, c), and attention weights."""
         batch = lstm_state[0].shape[1]
@@ -307,6 +309,8 @@ class AttentionLSTMAgent(RecurrentAgent):
                             (self.key_size,)).permute(0, 1, 3, 2, 4)
         values = self.values(cells).reshape(-1, batch, n, self.heads, self.value_size).permute(0, 1, 3, 2, 4)
         keeps = None if done is None else (1.0 - done.float()).reshape((-1, batch, 1))
+        # (T, B, 1, cells): broadcast over heads; -inf scores get zero weight after the softmax
+        masks = None if blocked is None else blocked.reshape(-1, batch, 1, n)
         h, c = lstm_state[0][0], lstm_state[1][0]
         # One fused cell per step (same parameters as self.lstm): much less per-step overhead
         # than calling nn.LSTM on a length-1 sequence inside this loop.
@@ -318,7 +322,10 @@ class AttentionLSTMAgent(RecurrentAgent):
                 h, c = keeps[t] * h, keeps[t] * c
             # The query needs this step's starting memory, so attention runs inside the time loop.
             q = F.layer_norm(self.query(h).reshape(batch, self.heads, self.key_size), (self.key_size,))
-            attention = (torch.matmul(k, q.unsqueeze(-1)).squeeze(-1) * scale).softmax(dim=-1)  # (B, heads, 49)
+            scores = torch.matmul(k, q.unsqueeze(-1)).squeeze(-1) * scale  # (B, heads, 49)
+            if masks is not None:
+                scores = scores.masked_fill(masks[t], float("-inf"))
+            attention = scores.softmax(dim=-1)
             readout = torch.matmul(attention.unsqueeze(-2), v).reshape(batch, self.heads * self.value_size)
             h, c = torch.lstm_cell(readout, (h, c), *lstm_weights)
             outputs.append(h)

@@ -35,4 +35,6 @@ Rules: never delete or overwrite existing code or checkpoints; new runs use tagg
 | E8 | Q5 | Behaviour statistics from E2: paddle movement while the ball is hidden, hit offsets, rally lengths | `analysis/behaviour.json` |
 | E9 | Q4, Q6 | LSTM memory timescale (forget-gate activity) and unit statistics across scratch, parent and fine-tuned models | `analysis/lstm_dynamics.json` |
 
+| E10 | Q4 | Attention block: replay each incoming flight with the attention-LSTM unable to attend to the ball's 3x3 cells before the fog (vs a same-size sham block); measure memory probe error inside the fog and return rate; plus attention-on-ball vs probe error per flight | `analysis/attention_block.jsonl` |
+
 Decision rules are written in each experiment's Flywheel node before results come in.

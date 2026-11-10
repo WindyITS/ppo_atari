@@ -84,13 +84,17 @@ class Player:
         return scene.locate(self.clean_frame(), self.obs[-1])
 
     @torch.inference_mode()
-    def forward(self, obs: np.ndarray, state=None):
+    def forward(self, obs: np.ndarray, state=None, blocked: np.ndarray | None = None):
         """Policy outputs for an observation (stack, 84, 84) from a memory state, without side effects.
+        blocked (attn_lstm only): bool (49,) attention cells the agent may not look at.
         Returns (probs (6,), value, internals, next state)."""
         x = torch.as_tensor(obs[None], dtype=torch.float32)
         internals = {}
+        if blocked is not None and not isinstance(self.agent, AttentionLSTMAgent):
+            raise ValueError("blocked attention cells need an attn_lstm agent")
         if isinstance(self.agent, AttentionLSTMAgent):
-            hidden, state, attention = self.agent.get_states_and_attention(x, state, None)
+            mask = None if blocked is None else torch.as_tensor(np.asarray(blocked, bool)[None])
+            hidden, state, attention = self.agent.get_states_and_attention(x, state, None, mask)
             internals["attention"] = attention[0].numpy().copy()
         elif self.recurrent:
             features = self.agent.network(x / 255.0)
@@ -107,16 +111,18 @@ class Player:
         probs = torch.softmax(logits, dim=-1)
         return probs, float(self.agent.critic(hidden)[0, 0]), internals, state
 
-    def step(self, transform: Transform | None = None, wipe: bool = False, action: int | None = None) -> Step:
+    def step(self, transform: Transform | None = None, wipe: bool = False, action: int | None = None,
+             blocked: np.ndarray | None = None) -> Step:
         """Play one agent step. transform changes what the model sees (not the game); wipe empties the memory
-        before this step (recurrent agents); action overrides the sampled action (the generator still draws)."""
+        before this step (recurrent agents); action overrides the sampled action (the generator still draws);
+        blocked (attn_lstm) removes attention cells for this step."""
         if self.done:
             raise RuntimeError("the game is over; call reset")
         where = scene.locate(self.clean_frame(), self.obs[-1])
         seen = self.obs if transform is None else transform(self.obs)
         if wipe and self.recurrent:
             self.state = zero_lstm_state(1, torch.device("cpu"))
-        probs, value, internals, self.state = self.forward(seen, self.state)
+        probs, value, internals, self.state = self.forward(seen, self.state, blocked)
         # Same sampling call as pong_rl.evaluate, so unperturbed games match the frozen evaluation.
         sampled = int(torch.multinomial(probs, 1, generator=self.generator).flatten()[0])
         chosen = sampled if action is None else int(action)

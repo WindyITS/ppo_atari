@@ -170,6 +170,57 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(finished(output, "recording"), {str(p) for p in paths if p.stem != "bad"})
 
 
+class AttentionBlockTests(unittest.TestCase):
+    def test_blocked_cells_get_no_attention_and_none_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            player = Player(make_checkpoint(Path(folder, "model.pt"), "attn_lstm"))
+            player.reset(10_000)
+            for _ in range(30):
+                player.step()
+            blocked = np.zeros(49, bool)
+            blocked[[10, 11, 17, 18]] = True
+            plain = player.forward(player.obs, player.state)
+            same = player.forward(player.obs, player.state, None)
+            np.testing.assert_array_equal(plain[2]["attention"], same[2]["attention"])
+            masked = player.forward(player.obs, player.state, blocked)
+            self.assertTrue((masked[2]["attention"][:, blocked] == 0).all())
+            np.testing.assert_allclose(masked[2]["attention"].sum(-1), 1.0, rtol=1e-5)
+            self.assertFalse(np.allclose(masked[2]["h"], plain[2]["h"]))
+            player.close()
+            cnn = Player(make_checkpoint(Path(folder, "cnn.pt"), "cnn"))
+            cnn.reset(10_000)
+            with self.assertRaisesRegex(ValueError, "attn_lstm"):
+                cnn.step(blocked=blocked)
+            cnn.close()
+
+
+class AttentionBlockScriptTests(unittest.TestCase):
+    def test_blocks_and_a_full_run_on_a_random_model(self):
+        block = load_script("attention_block")
+        ball = block.block_around(3, 1).reshape(7, 7)
+        self.assertEqual(ball.sum(), 6)                      # column 0 (enemy paddle) never blocked
+        self.assertTrue(ball[2:5, 1:3].all() and not ball[:, 0].any())
+        self.assertEqual(block.sham_row(3), 6)
+        self.assertEqual(block.sham_row(0), 6)
+        self.assertEqual(block.sham_row(5), 1)
+        self.assertFalse((block.block_around(3, 4) & block.block_around(block.sham_row(3), 4)).any())
+        record = load_script("record_rollouts")
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder, "checkpoints", "finetune", "attn_lstm", "clean_10.0M_to_fog_mask", "seed_1")
+            run.mkdir(parents=True)
+            path = make_checkpoint(run / "final.pt", "attn_lstm", use_fog=True, mask_enemy=True)
+            recorded = record.record(str(path), 2, 10_000, saliency_every=0)
+            rollouts = Path(folder, "rollouts")
+            rollouts.mkdir()
+            stem = rollouts / "finetune__attn_lstm__clean_10.0M_to_fog_mask__seed_1__final"
+            np.savez_compressed(f"{stem}.npz", **recorded["arrays"])
+            Path(f"{stem}.json").write_text(json.dumps(recorded["meta"]))
+            self.assertEqual(block.recording_for(path, rollouts), Path(f"{stem}.npz"))
+            row = block.run(path, episodes=1, seed=20_000, max_events=3, rollouts=rollouts)
+            self.assertEqual(row["events"], 3)
+            self.assertEqual(set(row["branches"]), set(block.BRANCHES))
+
+
 class EnemyShiftTests(unittest.TestCase):
     def test_shift_moves_only_the_enemy_paddle_and_branches_replay(self):
         shift = load_script("enemy_shift")
