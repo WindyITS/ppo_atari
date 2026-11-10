@@ -182,6 +182,14 @@ class EnemyShiftTests(unittest.TestCase):
         self.assertEqual(scene.locate(shift.shift_enemy(clean, -4))["enemy_y"], 19.5)
         stack = np.stack([clean] * 4)
         self.assertEqual(shift.shift_enemy(stack, 3).shape, (4, 84, 84))
+        # a ball passing through the enemy region (just after the hit) is not moved with the paddle
+        near = clean.copy()
+        near[40:42, 50] = 87
+        near[50:52, 10:12] = 236
+        moved = shift.shift_enemy(near, 6)
+        self.assertTrue((moved[50:52, 10:12] == 236).all())
+        self.assertTrue((moved[26:34, 8:11] == 236).all() and (moved[20:26, 8:11] == 87).all())
+        self.assertEqual(int((moved != near).sum()), 2 * 6 * 3)  # 6 rows vacated, 6 filled, 3 columns
         with tempfile.TemporaryDirectory() as folder:
             path = make_checkpoint(Path(folder, "model.pt"), "lstm", use_fog=True, mask_enemy=False)
             row = shift.run(path, episodes=1, seed=10_000, max_events=3)

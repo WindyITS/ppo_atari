@@ -43,19 +43,48 @@ RETURN_X = 40.0
 MAX_STEPS = 150
 
 
+PADDLE_MIN_ROWS = 4  # a vertical run of bright pixels at least this long is the paddle; the ball is ~2 rows
+
+
+def paddle_pixels(region: np.ndarray) -> np.ndarray:
+    """Boolean mask of the enemy paddle's pixels in one (rows, columns) crop of the enemy region: per column,
+    bright runs of at least PADDLE_MIN_ROWS rows. The ball, which can pass through the region just after the
+    enemy hits it, is shorter and is left out."""
+    bright = np.abs(region.astype(np.int16) - PONG_BG_VALUE) > scene.THRESHOLD
+    mask = np.zeros_like(bright)
+    for c in range(bright.shape[1]):
+        rows = np.flatnonzero(bright[:, c])
+        if not len(rows):
+            continue
+        runs = np.split(rows, np.flatnonzero(np.diff(rows) > 1) + 1)
+        for run in runs:
+            if len(run) >= PADDLE_MIN_ROWS:
+                mask[run, c] = True
+    return mask
+
+
 def shift_enemy(frame: np.ndarray, d: int) -> np.ndarray:
-    """The frame with the enemy paddle's columns moved d rows down inside the court (vacated rows painted in
-    the background). Works on (..., 84, 84) arrays."""
+    """The frame with the enemy paddle moved d rows down inside the court (+ is down). Only the paddle's own
+    pixels move: its old place is painted in the background and anything else in the enemy region (the ball
+    just after the enemy hit it) stays where it is. Works on (..., 84, 84) arrays."""
     if d == 0:
         return frame
     out = frame.copy()
-    region = frame[..., COURT_Y_MIN:COURT_Y_MAX, scene.ENEMY_REGION]
-    moved = np.full_like(region, PONG_BG_VALUE)
-    if d > 0:
-        moved[..., d:, :] = region[..., :-d, :]
-    else:
-        moved[..., :d, :] = region[..., -d:, :]
-    out[..., COURT_Y_MIN:COURT_Y_MAX, scene.ENEMY_REGION] = moved
+    flat = out.reshape(-1, *out.shape[-2:])
+    for f in flat:
+        region = f[COURT_Y_MIN:COURT_Y_MAX, scene.ENEMY_REGION]
+        mask = paddle_pixels(region)
+        if not mask.any():
+            continue
+        values = np.where(mask, region, PONG_BG_VALUE)
+        moved_values = np.full_like(region, PONG_BG_VALUE)
+        moved_mask = np.zeros_like(mask)
+        if d > 0:
+            moved_values[d:], moved_mask[d:] = values[:-d], mask[:-d]
+        else:
+            moved_values[:d], moved_mask[:d] = values[-d:], mask[-d:]
+        region[mask] = PONG_BG_VALUE
+        region[moved_mask] = moved_values[moved_mask]
     return out
 
 
