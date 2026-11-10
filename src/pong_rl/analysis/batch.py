@@ -14,7 +14,7 @@ def finished(output: Path, key: str) -> set[str]:
     if not output.is_file():
         return set()
     done = set()
-    for line in output.read_text().splitlines():
+    for line in output.read_text(errors="replace").splitlines():
         try:
             done.add(json.loads(line)[key])
         except (json.JSONDecodeError, KeyError):

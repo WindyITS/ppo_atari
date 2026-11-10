@@ -11,15 +11,28 @@ means over seeds with the per-seed values alongside.
 import argparse
 import collections
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """Complete rows of a JSON-lines file; lines torn by a crash (e.g. null bytes after a power cut) are skipped."""
     if not path.is_file():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows, torn = [], 0
+    for line in path.read_text(errors="replace").splitlines():
+        if not line.strip("\x00 \t"):
+            torn += bool(line)
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            torn += 1
+    if torn:
+        print(f"(skipped {torn} torn line(s) in {path})", file=sys.stderr)
+    return rows
 
 
 def kind_of(row: dict) -> str:
