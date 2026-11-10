@@ -229,6 +229,25 @@ def main():
                                                                  "corr_ball_enemy", "gap_ball", "gap_enemy")}})
         report["decoy_tracking"] = table
 
+    # E5c enemy-paddle shift (dose-response)
+    shifts = read_jsonl(args.analysis / "enemy_shift.jsonl")
+    if shifts:
+        print("\n## E5c enemy-paddle shift: paddle displacement per pixel of shift (gain, 95% CI) and return rate "
+              "by shift\n")
+        print("| arch | view | kind | seed | events | gain [95% CI] | mean move at -8/-4/+4/+8 px | return -8/-4/0/+4/+8 "
+              "| control_b |\n|---|---|---|---|---|---|---|---|---|")
+        table = []
+        for r in sorted(shifts, key=lambda r: (r["arch"], r["train_view"], r["kind"], seed_of(r) or 0)):
+            rate = r["return_rate"]
+            moves = "/".join(fmt(r["mean_shift_by_d"].get(str(d)), 1) for d in (-8, -4, 4, 8))
+            rates = "/".join(fmt(rate.get(f"shift_{d}")) for d in (-8, -4, 0, 4, 8))
+            ci = r["gain_ci"] or [float("nan")] * 2
+            print(f"| {r['arch']} | {r['train_view']} | {r['kind']} | {seed_of(r)} | {r['events']} | "
+                  f"{fmt(r['gain'])} [{fmt(ci[0])}, {fmt(ci[1])}] | {moves} | {rates} | {fmt(rate.get('control_b'))} |")
+            table.append({k: r[k] for k in ("arch", "train_view", "kind", "events", "gain", "gain_ci",
+                                            "mean_shift_by_d", "return_rate", "noise_sd")} | {"seed": seed_of(r)})
+        report["enemy_shift"] = table
+
     # E6 training controls: fog_mask return after k M steps on fog_mask, scratch vs each kind of fine-tune
     controls = read_jsonl(args.evaluations / "controls_stochastic.jsonl")
     if controls:
