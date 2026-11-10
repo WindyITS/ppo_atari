@@ -10,6 +10,8 @@ fog this is where the ball is hidden) two targets are decoded at each step of th
 from these inputs (whatever the recording holds):
     memory   lstm / attn_lstm: LSTM state [h, c]; cnn: its 512 features (computed from 4 stacked frames)
     frame    lstm: the encoder's 512 features of the current frame alone, before the LSTM (no memory)
+    random   when <name>.random.npz exists (scripts/random_control.py): the same state from an untrained network
+             of the same architecture fed the same frames (AtariARI's random-network baseline)
     paddle   the agent's own paddle height (a position the agent controls, so it can carry information)
     physics  ideal bouncing extrapolation from the ball's height and speed when it entered the window (a
              reference: what perfect memory of the entry would give; not a probe)
@@ -100,6 +102,10 @@ def probe(path: Path, seed: int = 0) -> dict:
             inputs["frame"] = arrays["features"][rows].astype(float)
     else:
         inputs["memory"] = arrays["features"][rows].astype(float)
+    twin = path.with_name(path.stem + ".random.npz")  # scripts/random_control.py: untrained network, same frames
+    if twin.exists():
+        with np.load(twin) as data:
+            inputs["random"] = data["memory"][rows].astype(float)
     inputs["paddle"] = arrays["agent_y"][rows, None].astype(float)
     keep = np.isfinite(inputs["paddle"][:, 0]) & np.isfinite(targets["now"])
     entry_y = np.concatenate([np.full(len(p.rows), p.entry_y) for p in passes])
@@ -136,7 +142,7 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("analysis/probes.jsonl"))
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
-    paths = sorted(p for p in args.rollouts.glob("*.npz") if args.match in p.name and not p.name.endswith(".tmp.npz"))
+    paths = sorted(p for p in args.rollouts.glob("*.npz") if args.match in p.name and not p.name.endswith((".tmp.npz", ".random.npz")))
     if not paths:
         sys.exit("no recordings found")
     failures = run_all(probe, paths, args.output, "recording", args.workers, describe)

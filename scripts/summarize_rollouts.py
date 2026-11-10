@@ -173,7 +173,7 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("analysis/rollout_summary.jsonl"))
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
-    paths = sorted(p for p in args.rollouts.glob("*.npz") if args.match in p.name and not p.name.endswith(".tmp.npz"))
+    paths = sorted(p for p in args.rollouts.glob("*.npz") if args.match in p.name and not p.name.endswith((".tmp.npz", ".random.npz")))
     if not paths:
         sys.exit("no recordings found")
     failures = run_all(functools.partial(summarize, root=args.root), paths, args.output, "recording",

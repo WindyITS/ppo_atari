@@ -221,6 +221,29 @@ class AttentionBlockScriptTests(unittest.TestCase):
             self.assertEqual(set(row["branches"]), set(block.BRANCHES))
 
 
+class RandomControlTests(unittest.TestCase):
+    def test_twin_replays_the_recording_and_feeds_the_probes(self):
+        control, record, probes = (load_script(n) for n in ("random_control", "record_rollouts", "probe_memory"))
+        with tempfile.TemporaryDirectory() as folder:
+            path = make_checkpoint(Path(folder, "model.pt"), "lstm", use_fog=True, mask_enemy=True)
+            recorded = record.record(str(path), 2, 10_000, saliency_every=0)
+            stem = Path(folder, "lstm_rec")
+            np.savez_compressed(f"{stem}.npz", **recorded["arrays"])
+            Path(f"{stem}.json").write_text(json.dumps(recorded["meta"]))
+            row = control.run(Path(f"{stem}.npz"), init_seed=0, root=Path(folder))
+            with np.load(row["random"]) as data:
+                memory = data["memory"]
+            self.assertEqual(memory.shape, (len(recorded["arrays"]["t"]), 256))
+            # make_checkpoint and the twin both initialise from torch seed 0, so here the "untrained" twin is
+            # the recorded model itself: step for step its memory must equal the recorded one (alignment check)
+            np.testing.assert_array_equal(memory[:, :128], recorded["arrays"]["h"])
+            np.testing.assert_array_equal(memory[:, 128:], recorded["arrays"]["c"])
+            other = control.run(Path(f"{stem}.npz"), init_seed=1, root=Path(folder))
+            with np.load(other["random"]) as data:
+                self.assertFalse(np.allclose(data["memory"][:, :128].astype(np.float32),
+                                             recorded["arrays"]["h"].astype(np.float32)))
+
+
 class EnemyShiftTests(unittest.TestCase):
     def test_shift_moves_only_the_enemy_paddle_and_branches_replay(self):
         shift = load_script("enemy_shift")
