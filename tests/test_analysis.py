@@ -246,6 +246,13 @@ class RandomControlTests(unittest.TestCase):
             # the recorded model itself: step for step its memory must equal the recorded one (alignment check)
             np.testing.assert_array_equal(memory[:, :128], recorded["arrays"]["h"])
             np.testing.assert_array_equal(memory[:, 128:], recorded["arrays"]["c"])
+            attn = make_checkpoint(Path(folder, "attn.pt"), "attn_lstm", use_fog=True, mask_enemy=True)
+            attn_recorded = record.record(str(attn), 1, 10_000, saliency_every=0)
+            attn_stem = Path(folder, "attn_rec")
+            np.savez_compressed(f"{attn_stem}.npz", **attn_recorded["arrays"])
+            Path(f"{attn_stem}.json").write_text(json.dumps(attn_recorded["meta"]))
+            with np.load(control.run(Path(f"{attn_stem}.npz"), init_seed=0, root=Path(folder))["random"]) as data:
+                np.testing.assert_array_equal(data["memory"][:, :128], attn_recorded["arrays"]["h"])
             other = control.run(Path(f"{stem}.npz"), init_seed=1, root=Path(folder))
             with np.load(other["random"]) as data:
                 self.assertFalse(np.allclose(data["memory"][:, :128].astype(np.float32),

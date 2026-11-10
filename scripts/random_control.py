@@ -27,7 +27,7 @@ import torch  # noqa: E402
 
 from pong_rl.analysis.player import Player  # noqa: E402
 from pong_rl.analysis.rollouts import load  # noqa: E402
-from pong_rl.models import make_agent  # noqa: E402
+from pong_rl.models import make_agent, zero_lstm_state  # noqa: E402
 
 
 def random_twin(checkpoint: str, folder: str, seed: int) -> str:
@@ -65,7 +65,7 @@ def run(recording: Path, init_seed: int, root: Path) -> dict:
         try:
             for game in games:
                 player.reset(seed + int(game))
-                state = None
+                state = zero_lstm_state(1, torch.device("cpu")) if twin.recurrent else None
                 while not player.done:
                     obs = player.obs.copy()
                     _, _, internals, state = twin.forward(obs, state)
