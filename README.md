@@ -46,24 +46,12 @@ uv run pytest
 | `cnn` (default) | 4 stacked 84x84 frames | none beyond the 4 frames | CleanRL `ppo_atari.py` |
 | `lstm` | 1 84x84 frame | LSTM (128 units) over the whole episode | CleanRL `ppo_atari_lstm.py` |
 | `attn_lstm` | 1 84x84 frame | LSTM (128 units) that reads the frame through spatial attention | Mott et al. 2019, simplified |
-| `vit` | 4 stacked 84x84 frames | none beyond the 4 frames | ViT (Dosovitskiy et al. 2021) in place of the CNN |
-| `vit_lstm` | 1 84x84 frame | the same LSTM (128 units) as `lstm` | ViT in place of the CNN |
 
 | `--arch` | Parameters | Image to LSTM |
 |---|---|---|
 | `cnn` | 1,687,719 | (no LSTM) whole frame flattened to 512 features |
 | `lstm` | 2,007,591 | whole frame flattened to 512 features |
 | `attn_lstm` | 225,959 | weighted read of the 7x7 conv map, 128 numbers |
-| `vit` | 1,733,223 | (no LSTM) CLS token projected to 512 features |
-| `vit_lstm` | 1,990,119 | CLS token projected to 512 features |
-
-`vit` and `vit_lstm` swap only the vision part: the Nature CNN becomes a vision transformer
-(`ViTEncoder`) that still outputs 512 features, so `vit` pairs with `cnn` and `vit_lstm` with `lstm`
-(same frame stacking, heads and LSTM; sizes within 3%). The 84x84 frame is cut into 12x12 patches,
-the same 7x7 grid (49 tokens) as the CNN's last feature map; a CLS token and learned position
-embeddings go through 5 pre-norm blocks (width 160, 5 heads, MLP 640, no dropout).
-`ViTAgent.get_hidden_and_attention` and `ViTLSTMAgent.get_states_and_attention` return the CLS
-token's last-block attention over the patches, shaped `(steps * batch, 5, 49)`.
 
 ### Attention + LSTM (`attn_lstm`)
 
@@ -136,8 +124,7 @@ Useful flags:
 - `--num-envs 16`, `--num-steps 256` (games played side by side, and steps each game plays per batch)
 - `--update-epochs 4`, `--num-minibatches 4` (PPO epochs, and minibatches per epoch)
 - `--target-kl 0.015` (optional: skip a batch's remaining epochs once an epoch's mean approximate KL exceeds it)
-- `--learning-rate`: initial learning rate, linearly annealed. Default per architecture: 0.001 for `cnn`, `lstm`
-  and `attn_lstm` (the first sweep), 0.00025 for `vit` and `vit_lstm` (the standard PPO Atari rate; 0.001 is high for a transformer)
+- `--learning-rate`: initial learning rate, linearly annealed. Default: 0.001 for every architecture (the first sweep)
 - `--ent-coef 0.02` (entropy bonus coefficient)
 - `--no-track` (disable Weights & Biases logging for quick local testing)
 - `--parallel-envs` (one CPU process per game; faster collection for a single job; uses more host memory)
@@ -263,7 +250,7 @@ To evaluate a whole sweep on every view (the frozen evaluation in `docs/analysis
 # 30 games (seeds 10000-10029), sampling policy, 4 CPU processes -> evaluations/sweep_stochastic.jsonl
 uv run python scripts/evaluate_sweep.py
 uv run python scripts/evaluate_sweep.py --policy greedy --roles scratch --views own   # greedy check
-uv run python scripts/evaluate_sweep.py --archs vit vit_lstm --dry-run                # list the jobs only
+uv run python scripts/evaluate_sweep.py --archs attn_lstm attn_lstm_wide --dry-run   # list the jobs only
 # Fine-tune vs scratch after the same k = 0..5M steps on the target view (mask, fog, fog_mask), own view:
 # scratch step_00.0M..step_05.0M against fine-tune step_10.0M..step_15.0M (step_10.0M = the parent's weights)
 uv run python scripts/evaluate_sweep.py --equal-steps
@@ -288,7 +275,7 @@ only on the reset no-op count, and seeds 10000-10029 give 19 distinct counts, so
 (effective n = 19); stochastic evaluation is unaffected.
 
 Evaluation freezes the weights (`eval` and inference mode), restores each checkpoint's architecture
-and visibility condition (unless `--view` overrides it), and uses four input frames for `cnn` and `vit`
+and visibility condition (unless `--view` overrides it), and uses four input frames for `cnn`
 and one for the recurrent agents. Each episode
 resets the environment to `seed + episode_index` and clears recurrent memory after either completion or timeout.
 Stochastic evaluation resets a separate CPU action generator to that episode's seed, independently

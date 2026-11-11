@@ -1,11 +1,10 @@
 # Analysis plan
 
-Decided 2026-11-07, while the `vit` / `vit_lstm` sweep trains on `computing`.
+Decided 2026-11-07. A vision-transformer counterpart of `cnn` and `lstm` was planned at the time, to get the
+same analysis; it has since been dropped and removed from the code.
 
-**Focus:** `cnn` (4 stacked frames, no memory) vs `lstm` (1 frame + LSTM memory). The `vit` / `vit_lstm`
-pair will get the same analysis once trained, giving a 2×2 of vision (CNN vs ViT) × memory (frame stack vs
-LSTM) at matched size. `attn_lstm` is set aside: it is 7–9× smaller than the others, so its results are
-confounded with size.
+**Focus:** `cnn` (4 stacked frames, no memory) vs `lstm` (1 frame + LSTM memory). `attn_lstm` is set aside:
+it is 7–9× smaller than the others, so its results are confounded with size.
 
 Current numbers come from training games (sampling policy, weights changing), not a frozen evaluation.
 

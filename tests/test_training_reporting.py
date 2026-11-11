@@ -40,7 +40,7 @@ class TrainingReportingTests(unittest.TestCase):
         torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))])
 
     def test_same_step_vector_outcomes_and_window_metrics_for_both_models(self):
-        for arch in ("cnn", "lstm", "attn_lstm", "vit", "vit_lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as directory:
                 def factory(*args, **kwargs):
                     return lambda: gym.wrappers.RecordEpisodeStatistics(TwoStepGame(kwargs["frame_stack"]))

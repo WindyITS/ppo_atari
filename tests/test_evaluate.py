@@ -42,7 +42,7 @@ class EvaluationTests(unittest.TestCase):
         torch.set_num_threads(1)
 
     def make_checkpoint(self, path, arch):
-        channels = 4 if arch in ("cnn", "vit") else 1
+        channels = 4 if arch == "cnn" else 1
         env = gym.vector.SyncVectorEnv([lambda: ShortGame(channels, [])])
         model = make_agent(arch, env)
         with torch.no_grad():
@@ -57,7 +57,7 @@ class EvaluationTests(unittest.TestCase):
         env.close()
 
     def test_both_architectures_use_saved_masks_and_reproducible_action_rng(self):
-        for arch in ("cnn", "lstm", "attn_lstm", "vit", "vit_lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "model.pt"
                 self.make_checkpoint(path, arch)
@@ -68,7 +68,7 @@ class EvaluationTests(unittest.TestCase):
                     actions = []
                     def factory(env_id, idx, video, name, *, use_fog, mask_enemy, frame_stack):
                         self.assertTrue(use_fog and mask_enemy)
-                        self.assertEqual(frame_stack, 4 if arch in ("cnn", "vit") else 1)
+                        self.assertEqual(frame_stack, 4 if arch == "cnn" else 1)
                         return lambda: ShortGame(frame_stack, actions)
                     with patch("pong_rl.evaluate.make_env", factory), contextlib.redirect_stderr(io.StringIO()):
                         result = evaluate_checkpoint(path, episodes=4, seed=10000)

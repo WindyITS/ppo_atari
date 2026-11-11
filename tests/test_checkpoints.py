@@ -84,7 +84,7 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(Args().total_timesteps, 15_000_000)
 
     def test_zero_and_crossed_milestones_for_both_models(self):
-        for arch in ("cnn", "lstm", "attn_lstm", "vit", "vit_lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch), inside_temporary_directory():
                 tracker = self.run_training(Args(num_steps=2, arch=arch, total_timesteps=6, num_envs=1), (0, 3, 5, 7))
                 folder = Path("checkpoints", "scratch", arch, "clean", "seed_1")
@@ -121,7 +121,7 @@ class CheckpointTests(unittest.TestCase):
 
     def test_finetune_continues_parent_steps_with_its_own_folder_and_schedule(self):
         milestones = (0, 3, 5, 7, 9)
-        for arch in ("cnn", "lstm", "attn_lstm", "vit", "vit_lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm"):
             with self.subTest(arch=arch), inside_temporary_directory():
                 self.run_training(Args(num_steps=2, arch=arch, total_timesteps=6, num_envs=1, track=False), milestones)
                 parent_path = Path("checkpoints", "scratch", arch, "clean", "seed_1", "step_3.pt")
