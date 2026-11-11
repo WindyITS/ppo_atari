@@ -186,6 +186,11 @@ paddle mirrored top to bottom or erased; the game itself is unchanged. Mean retu
 - **E7 saliency agrees:** erasing the enemy paddle while the ball is in the agent's half changes the
   fog agents' policies strongly (KL 0.44-1.15), the clean CNN's hardly (0.02-0.05). The attention-LSTM's two
   heads put 10-15x the uniform weight on the enemy paddle's cell, on the clean and on the fog view.
+- **Attention over a flight** (`scripts/attention_maps.py`, added 2026-11-11; returned flights of the 30
+  evaluation games, aligned on the ball entering the agent's half). Weight on the ball's 3x3 cells (uniform:
+  0.18) in the 8 steps before the fog / steps 1-8 inside it: fog + mask models 0.35-0.80 / 0.01-0.24 (the
+  heads track the ball cell by cell, then let it go). Fog models instead turn to the enemy paddle inside the
+  fog (0.27-0.69, uniform about 0.06); clean models watch it throughout (0.29-0.62). Paper figure `attention`.
 - **How the cue is read: E5c, a small shift.** Each incoming flight is replayed from a snapshot with the enemy
   paddle the model sees moved by -8, -4, +4 or +8 px (only the paddle's pixels; the ball is never moved), with
   the same action noise as the unshifted replay. The gain is how far the agent's paddle moves per pixel of

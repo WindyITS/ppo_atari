@@ -209,6 +209,8 @@ paddle. It does.
     erasure, so it ignores the opponent's paddle. The clean LSTM partly relies on it. The clean attention
     agent depends on it almost entirely: its heads put 10--15 times the uniform weight on that paddle's cell,
     and it collapses when the paddle is hidden.
+  \item \textbf{The fog attention agents look at the shortcut.} As the ball disappears into the fog, their
+    attention leaves the ball and moves to the opponent's paddle (Figure~\ref{fig:attention}).
 \end{itemize}
 
 The agents do not simply copy the opponent's paddle height. When the paddle is shifted, 16 of the 17
@@ -288,6 +290,35 @@ explains why a probe reads some of the hidden ball from its features (\Rsq{} 0.4
 untrained network's: the information is in its paddle, an input, not in a memory.
 
 \subsection{The attention agent remembers only what it looked at}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{attention}
+  \caption{Where the attention agent looks while a ball comes towards it. Top: one flight from the
+    evaluation games of a curriculum model on fog + hidden paddle, on the frames the agent sees. Bottom:
+    attention weight on three targets, aligned on the step the ball enters the agent's half, for every model
+    that plays its view (curriculum and from scratch). On the clean view nothing is hidden, so the alignment
+    is on the midline. Near arrival, the ball's $3\times3$ cells overlap the agent's paddle column.}
+  \label{fig:attention}
+\end{figure}
+
+\paragraph{Where it looks.} Figure~\ref{fig:attention} shows where the attention agent looks while a ball
+comes towards it.
+\begin{itemize}
+  \item \textbf{On fog + hidden paddle, the heads follow the ball while it is visible}, cell by cell. In the
+    eight steps before the fog, 0.35--0.80 of the weight is on the ball's $3\times3$ cells, against 0.18 for
+    uniform attention.
+  \item \textbf{When the ball vanishes, the attention lets it go.} It spreads out (0.01--0.24 on where the
+    ball really is) until the ball nears the agent's paddle.
+  \item \textbf{The fog-only models turn to the shortcut instead.} Inside the fog they put 0.27--0.69 of
+    their weight on the opponent's paddle, against about 0.06 for uniform attention.
+  \item \textbf{The clean models watch the opponent's paddle throughout} (0.29--0.62), consistent with their
+    collapse when it is hidden.
+\end{itemize}
+On fog + hidden paddle, then, the ball enters memory through attention before the fog, and nothing in the fog
+is worth looking at. This suggests the test below.
+
+\paragraph{Blocking attention.}
 
 \begin{figure}[t]
   \centering

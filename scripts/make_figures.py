@@ -312,8 +312,82 @@ def fig_block(data: Path, out: Path):
     save(fig, out, "block")
 
 
+TARGET_COLOURS = {"ball": "#eda100", "enemy_paddle": "#6250d6", "own_paddle": "#e87ba4"}  # slots 4, 7, 5
+TARGET_NAMES = {"ball": "the ball (3x3 cells)", "enemy_paddle": "opponent's paddle", "own_paddle": "own paddle"}
+STRIP_STEPS = (-8, -4, -1, 0, 6, 13)
+
+
+def strip_title(k: int) -> str:
+    return "0: enters fog" if k == 0 else f"{k:+d}"
+
+
+def fig_attention(data: Path, out: Path):
+    """Top: one returned flight of the curriculum attention agent on fog + hidden paddle (attention_strip.npz).
+    Bottom: attention on each target, aligned on fog entry, per view (attention_maps.json; models that play)."""
+    from matplotlib.gridspec import GridSpec
+    strip = np.load(data / "attention_strip.npz")
+    rows = [r for r in json.loads((data / "attention_maps.json").read_text())
+            if r["flights"] >= 100 and r["view"] in ("clean", "fog", "fog_mask")
+            and model_key({"run": r["run"]}) is not None]
+    fig = plt.figure(figsize=(7.2, 4.4))
+    grid = GridSpec(2, 6, figure=fig, height_ratios=(1, 1.2), hspace=0.42, wspace=0.12)
+    rgb = matplotlib.colors.to_rgb(COLOURS["attn_lstm"])
+    steps = list(strip["steps"])
+    for column, k in enumerate(STRIP_STEPS):
+        ax = fig.add_subplot(grid[0, column])
+        i = steps.index(k)
+        ax.imshow(strip["seen"][i], cmap="gray", vmin=0, vmax=255, interpolation="nearest")
+        weights = strip["attention"][i].mean(axis=0).reshape(7, 7)  # mean over the two heads
+        overlay = np.zeros((7, 7, 4))
+        overlay[..., :3] = rgb
+        overlay[..., 3] = np.clip(weights / 0.4, 0, 1) * 0.85
+        ax.imshow(overlay, extent=(-0.5, 83.5, 83.5, -0.5), interpolation="nearest")
+        x, y = strip["ball"][i]
+        if x == x:  # the ball is a few pixels: circle it (inside the fog it is hidden from the agent)
+            ax.add_patch(Circle((x, y), 3.5, fill=False, edgecolor=TARGET_COLOURS["ball"], linewidth=1.0,
+                                linestyle="-" if x < 42 else (0, (1.5, 1))))
+        ax.set_title(strip_title(k), fontsize=7.5, color=INK)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+    fig.text(0.5, 0.535, "steps from the ball entering the fog. Green: attention (mean of the two heads, per "
+             "cell of the 7x7 map); circle: the ball (dotted: hidden)", ha="center", color=INK_2, fontsize=7)
+    panels = (("clean", "clean (aligned at the midline)"), ("fog", "fog"), ("fog_mask", "fog + hidden paddle"))
+    shared = None
+    for column, (view, title) in enumerate(panels):
+        ax = fig.add_subplot(grid[1, 2 * column:2 * column + 2], sharey=shared)
+        shared = shared or ax
+        models = [r for r in rows if r["view"] == view]
+        ks = np.array(models[0]["steps"])
+        if view != "clean":
+            ax.axvspan(0, ks[-1], color=GRID, alpha=0.6, linewidth=0)
+            ax.text(ks[-1] - 0.3, 0.97, "ball hidden", ha="right", va="top", fontsize=7, color=INK_2)
+        ax.axhline(models[0]["uniform"]["ball"], color=NEUTRAL, linewidth=0.8, linestyle=(0, (2, 2)))
+        for target, c in TARGET_COLOURS.items():
+            curves = np.array([r["mean"][target] for r in models])
+            for curve in curves:
+                ax.plot(ks, curve, color=c, linewidth=0.6, alpha=0.3)
+            ax.plot(ks, curves.mean(axis=0), color=c, linewidth=2)
+        ax.set_title(f"{title}: {len(models)} models", fontsize=8, color=INK)
+        ax.set_xlim(ks[0], ks[-1])
+        ax.set_ylim(0, 1)
+        if column == 0:
+            ax.set_ylabel("attention weight")
+        else:
+            ax.tick_params(labelleft=False)
+    fig.text(0.5, 0.02, "steps from the ball entering the agent's half (thin lines: models; thick: mean)",
+             ha="center", color=INK, fontsize=8)
+    handles = [plt.Line2D([], [], color=c, linewidth=2) for c in TARGET_COLOURS.values()]
+    handles.append(plt.Line2D([], [], color=NEUTRAL, linewidth=0.8, linestyle=(0, (2, 2))))
+    fig.legend(handles, [f"on {n}" for n in TARGET_NAMES.values()] + ["uniform attention on 3x3 cells"],
+               loc="lower center", ncol=4, fontsize=7.5, bbox_to_anchor=(0.5, -0.07))
+    save(fig, out, "attention")
+
+
 FIGURES = {"views": fig_views, "returns": fig_returns, "shift": fig_shift, "wipes": fig_wipes,
-           "probes": fig_probes, "block": fig_block}
+           "probes": fig_probes, "block": fig_block, "attention": fig_attention}
 
 
 def main():
