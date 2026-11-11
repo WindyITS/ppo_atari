@@ -13,6 +13,11 @@
 set -euo pipefail
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 export PATH="$HOME/.local/bin:$PATH"
+# GPU memory (8 GB card): one run peaks near 4 GB with default settings, 0.87 GB with an allocator that does
+# not fragment and with every replay chunk recomputed in the backward pass. Neither changes the maths
+# (recomputation is exact); a resumed run keeps the threshold stored in its checkpoint.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+REPLAY_THRESHOLD=0
 ARCH=attn_lstm_wide
 SEEDS="${SEEDS:-1 2 3}"
 MAX_PARALLEL="${MAX_PARALLEL:-6}"
@@ -57,11 +62,13 @@ launch() {  # launch <run folder> <pong-rl args...>
   fi
   echo "Launching ${run} at $(date -Is)"
   echo "=== launched at $(date -Is) ===" >> "logs/${run}/train.log"
-  uv run pong-rl --arch "${ARCH}" --total-timesteps "${TOTAL}" "$@" >> "logs/${run}/train.log" 2>&1 &
+  uv run pong-rl --arch "${ARCH}" --total-timesteps "${TOTAL}" --replay-checkpoint-threshold "${REPLAY_THRESHOLD}" \
+    "$@" >> "logs/${run}/train.log" 2>&1 &
 }
 
-for seed in ${SEEDS}; do
-  for view in clean fog_mask; do
+# Clean first: those runs are the fine-tunes' parents.
+for view in clean fog_mask; do
+  for seed in ${SEEDS}; do
     flags="VIEW_FLAGS_${view}"
     # shellcheck disable=SC2086  # the view flags are meant to split into words
     launch "scratch/${ARCH}/${view}/seed_${seed}" --seed "${seed}" ${!flags}
