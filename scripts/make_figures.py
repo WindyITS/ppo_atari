@@ -465,68 +465,105 @@ def record_flight(seed: int = 3, warmup: int = 15):
     return screens[span], balls[span], {v: f[span] for v, f in frames.items()}
 
 
+SCREEN_CROP = (31, 197)           # court plus a sliver of each wall; drops the score bar
+SCREEN_ENEMY = (213, 130, 74)
+VIEW_SUBTITLES = {"clean": "everything visible", "mask": "opponent's paddle hidden",
+                  "fog": "agent's half hidden", "fog_mask": "both hidden"}
+
+
+def mist(height: int, width: int, x0: float, x1: float, alpha: float = 0.42, feather: float = 2.5) -> np.ndarray:
+    """RGBA overlay: a soft white haze over columns [x0, x1) with feathered edges."""
+    xs = np.arange(width) + 0.5
+    profile = 1 / (1 + np.exp(-(xs - x0) / feather * 2)) * 1 / (1 + np.exp((xs - x1) / feather * 2))
+    rgba = np.ones((height, width, 4))
+    rgba[..., 3] = np.clip(alpha * np.broadcast_to(profile[None], (height, width)), 0, 1)
+    return rgba
+
+
+def paddle_box(rgb: np.ndarray, colour: tuple, columns: slice) -> tuple[float, float, float, float] | None:
+    """(x, y, width, height) of a paddle on the screen, from its colour inside the court."""
+    court = rgb[SCREEN_COURT[0]:SCREEN_COURT[1], columns]
+    ys, xs = np.where((court == colour).all(axis=-1))
+    if len(xs) == 0:
+        return None
+    return (xs.min() + columns.start - 0.5, ys.min() + SCREEN_COURT[0] - 0.5, xs.max() - xs.min() + 1,
+            ys.max() - ys.min() + 1)
+
+
 def fig_environments(data: Path, out: Path):
-    screens, balls, frames = record_flight()
+    screens, balls, _ = record_flight()
     hit = max(range(len(balls)), key=lambda i: balls[i][0] if balls[i] else -1)  # at the agent's paddle
-    middle = min((i for i, b in enumerate(balls) if b and SCREEN_FOG[0] + 25 < b[0]), default=hit)
-    hidden_fog = {"fog", "fog_mask"}
-    hidden_mask = {"mask", "fog_mask"}
-    fig, axes = plt.subplots(2, 4, figsize=(7.2, 4.35), gridspec_kw={"height_ratios": (210 / 160, 1),
-                                                                    "hspace": 0.08, "wspace": 0.06})
-    for column, view in enumerate(VIEWS):
-        ax = axes[0, column]
-        background = screens[hit].copy()
-        # The screen as the agent's view paints it: the fog and the mask in the court's colour.
-        court = slice(SCREEN_COURT[0], SCREEN_COURT[1])
-        if view in hidden_fog:
-            background[court, int(round(SCREEN_FOG[0])):int(round(SCREEN_FOG[1]))] = SCREEN_BG
-        if view in hidden_mask:
-            background[court, int(round(SCREEN_MASK[0])):int(round(SCREEN_MASK[1]))] = SCREEN_BG
-        ax.imshow(background, interpolation="nearest")
-        for x0, x1, hidden in ((*SCREEN_FOG, view in hidden_fog), (*SCREEN_MASK, view in hidden_mask)):
-            if hidden:
-                ax.add_patch(Rectangle((x0 - 0.5, SCREEN_COURT[0] - 0.5), x1 - x0, SCREEN_COURT[1] - SCREEN_COURT[0],
-                                       facecolor=(1, 1, 1, 0.07), edgecolor="white", linewidth=0.9,
-                                       linestyle=(0, (3, 2))))
-        trail = [(i, b) for i, b in enumerate(balls) if b]
-        for k, (i, (x, y)) in enumerate(trail):
-            alpha = 0.35 + 0.65 * k / max(1, len(trail) - 1)
-            hidden = (view in hidden_fog and SCREEN_FOG[0] <= x < SCREEN_FOG[1]) or \
-                (view in hidden_mask and SCREEN_MASK[0] <= x < SCREEN_MASK[1])
-            if hidden:
-                ax.add_patch(Circle((x, y), 2.6, fill=False, edgecolor="white", alpha=alpha, linewidth=0.8,
-                                    linestyle=(0, (1, 1))))
-            else:
-                ax.add_patch(Rectangle((x - 1.5, y - 2), 3, 4, color="white", alpha=alpha, linewidth=0))
-        ax.set_title(VIEW_NAMES[view], color=INK)
-        if view == "fog":
-            ax.text(np.mean(SCREEN_FOG), SCREEN_COURT[1] - 4, "fog", color="white", ha="center", va="bottom",
-                    fontsize=7.5)
-        if view == "mask":
-            ax.text(SCREEN_MASK[1] + 2, SCREEN_COURT[1] - 4, "hidden\npaddle", color="white", ha="left",
-                    va="bottom", fontsize=7)
+    path = [b for b in balls[:hit + 1] if b]
+    ys = [y for _, y in path]
+    bounces = [path[i] for i in range(1, len(path) - 1) if (ys[i] - ys[i - 1]) * (ys[i + 1] - ys[i]) < 0]
+    corners = [path[0], *bounces, path[-1]]
+    # Both paddles at the moment each touches the ball: the opponent's from the flight's first step, the rest
+    # (agent's paddle and the ball at its paddle) from the hit.
+    scene_rgb = screens[hit].copy()
+    scene_rgb[SCREEN_COURT[0]:SCREEN_COURT[1], :21] = screens[0][SCREEN_COURT[0]:SCREEN_COURT[1], :21]
+    top, bottom = SCREEN_CROP
+    fig, axes = plt.subplots(1, 4, figsize=(7.2, 2.2), gridspec_kw={"wspace": 0.05})
+    for ax, view in zip(axes, VIEWS):
+        fog, mask = view in ("fog", "fog_mask"), view in ("mask", "fog_mask")
+        frame = scene_rgb.copy()
+        court = slice(*SCREEN_COURT)
+        enemy = paddle_box(frame, SCREEN_ENEMY, slice(0, int(SCREEN_MASK[1]) + 2))
+        if fog:  # painted over, as in the agent's view: the ball vanishes
+            frame[court, int(round(SCREEN_FOG[0])):int(round(SCREEN_FOG[1]))] = SCREEN_BG
+        if mask:
+            frame[court, int(round(SCREEN_MASK[0])):int(round(SCREEN_MASK[1]))] = SCREEN_BG
+        ax.imshow(frame, interpolation="nearest", extent=(-0.5, 159.5, 209.5, -0.5))
+        if fog:
+            ax.imshow(mist(210, 160, *SCREEN_FOG), interpolation="bilinear", extent=(-0.5, 159.5, 209.5, -0.5))
+            ax.text(np.mean(SCREEN_FOG), bottom - 7, "fog", color="white", ha="center", va="bottom",
+                    fontsize=7.5, alpha=0.95)
+        if mask and enemy:
+            ax.add_patch(Rectangle(enemy[:2], enemy[2], enemy[3], fill=False, edgecolor=(0.84, 0.51, 0.29),
+                                   linewidth=0.9, linestyle=(0, (2, 1.5))))
+        # The flight: solid where this view shows the ball, dashed where it hides it.
+        def hidden(x):
+            return (fog and SCREEN_FOG[0] <= x < SCREEN_FOG[1]) or (mask and SCREEN_MASK[0] <= x < SCREEN_MASK[1])
+        # Straight lines between the flight's key points (start, wall bounces, end), cut where the view hides it.
+        for (xa, ya), (xb, yb) in zip(corners[:-1], corners[1:]):
+            ts = np.linspace(0, 1, 200)
+            xs, ys = xa + (xb - xa) * ts, ya + (yb - ya) * ts
+            gone = np.array([hidden(x) for x in xs])
+            cuts = np.flatnonzero(np.diff(gone.astype(int))) + 1
+            for run in np.split(np.arange(len(ts)), cuts):
+                run = np.append(run, min(run[-1] + 1, len(ts) - 1))
+                g = gone[run[0]]
+                ax.plot(xs[run], ys[run], color="white", linewidth=1.0 if g else 1.3, alpha=0.85 if g else 0.95,
+                        linestyle=(0, (2.2, 1.6)) if g else "-", solid_capstyle="round", dash_capstyle="round")
+        (xa, ya), (xb, yb) = corners[-2], corners[-1]
+        ax.annotate("", xy=(xb, yb), xytext=(xb - (xb - xa) * 0.08, yb - (yb - ya) * 0.08),
+                    arrowprops=dict(arrowstyle="-|>", color="white", lw=0.0, mutation_scale=7))
         if view == "clean":
-            ax.text(20, SCREEN_COURT[1] - 4, "opponent", color="#f2c9a8", ha="left", va="bottom", fontsize=7)
-            ax.text(141, SCREEN_COURT[1] - 4, "agent", color="#bfe6bf", ha="right", va="bottom", fontsize=7)
-        small = axes[1, column]
-        small.imshow(frames[view][middle], cmap="gray", vmin=0, vmax=255, interpolation="nearest")
-        for (x0, x1), hidden in (((42, 72), view in hidden_fog), ((6, 12), view in hidden_mask)):
-            if hidden:  # same regions on the agent's frame (rows 14-76: the court)
-                small.add_patch(Rectangle((x0 - 0.5, 13.5), x1 - x0, 63, fill=False, edgecolor="white",
-                                          alpha=0.6, linewidth=0.8, linestyle=(0, (3, 2))))
-        if balls[middle]:  # the ball is a couple of pixels here: ring it (dotted where this view hides it)
-            x, y = balls[middle][0] / TO_SCREEN, balls[middle][1] * 84 / 210
-            in_fog = view in hidden_fog and 42 <= x < 72
-            small.add_patch(Circle((x, y), 3.2, fill=False, edgecolor=TARGET_COLOURS["ball"], linewidth=1.0,
-                                   linestyle=(0, (1.5, 1)) if in_fog else "-"))
-        for a in (ax, small):
-            a.set_xticks([])
-            a.set_yticks([])
-            a.grid(False)
-            for spine in a.spines.values():
-                spine.set_visible(False)
-    axes[1, 0].set_ylabel("what the agent receives\n(84x84, one frame)", color=INK_2, fontsize=7.5)
-    axes[0, 0].set_ylabel("one flight on the game screen", color=INK_2, fontsize=7.5)
+            agent = paddle_box(frame, (92, 186, 92), slice(130, 150))
+            if enemy:
+                ax.text(enemy[0] + enemy[2] + 3, enemy[1] + enemy[3] / 2, "opponent", color="white",
+                        fontsize=6.5, va="center", ha="left")
+            if agent:
+                ax.text(agent[0] + agent[2], agent[1] - 3, "agent", color="white", fontsize=6.5,
+                        va="bottom", ha="right")
+        ax.set_xlim(-0.5, 159.5)
+        ax.set_ylim(bottom - 0.5, top - 0.5)
+        ax.text(0.5, 1.13, VIEW_NAMES[view], transform=ax.transAxes, ha="center", va="bottom", fontsize=8.5,
+                fontweight="bold", color=INK)
+        ax.text(0.5, 1.03, VIEW_SUBTITLES[view], transform=ax.transAxes, ha="center", va="bottom", fontsize=7.5,
+                color=INK_2)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(False)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+    handles = [plt.Line2D([], [], color=INK_2, linewidth=1.3),
+               plt.Line2D([], [], color=INK_2, linewidth=1.0, linestyle=(0, (2.2, 1.6))),
+               plt.Rectangle((0, 0), 1, 1, facecolor="#c9a58a", edgecolor="none"),
+               plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor=(0.84, 0.51, 0.29), linewidth=0.9,
+                             linestyle=(0, (2, 1.5)))]
+    fig.legend(handles, ["ball path the agent sees", "ball path hidden from it", "fog over the agent's half",
+                         "hidden opponent paddle"], loc="lower center", ncol=4, fontsize=7,
+               bbox_to_anchor=(0.5, -0.02), handlelength=2.2, columnspacing=1.6)
     save(fig, out, "environments")
 
 
