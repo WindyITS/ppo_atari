@@ -85,6 +85,10 @@ Share of replayed balls the agent returns, 600 replays per model, mean of 3 seed
 | cnn fog + mask, fine-tuned (failed) | 0.47 | 0.46 | 0.46 | 0.46 |
 | cnn clean / mask / fog, scratch | 0.99 | 0.99 | 0.98-0.99 | 0.73-0.92 |
 | attn_lstm clean, scratch | 0.95 | 0.84 | 0.65 | 0.56 |
+| attn_lstm fog + mask, curriculum | 0.96 | 0.73 (0.59-0.98) | **0.14** | **0.17** |
+| attn_lstm fog + mask, scratch (s2, the seed that learned) | 0.96 | 0.58 | 0.20 | 0.35 |
+| attn_lstm fog, curriculum | 0.93 | 0.75 | 0.40 | 0.44 |
+| attn_lstm fog, scratch (s1, s2) | 0.96 | 0.87 | 0.28 | 0.34 |
 
 A second untouched branch with different action noise matches the first within 0.04 everywhere.
 
@@ -100,6 +104,12 @@ A second untouched branch with different action noise matches the first within 0
   0.73-0.92): the stack is how it reads the ball's speed.
 - **The attention-LSTM uses its memory even with nothing hidden** (clean view: down to 0.32 for one seed):
   its memory chooses where the attention heads look, so a wipe blinds it until the heads find the ball again.
+- **The attention-LSTM on the fog views depends on its memory most of all** (added 2026-11-11): wiping it at
+  fog entry leaves 0.06-0.20 of balls returned on fog + mask and 0.18-0.61 on fog, where the LSTM agent lost
+  little (0.85). Even with the enemy paddle in view, it does not rebuild the ball from the shortcut after a
+  wipe. Caveat: unlike the LSTM agent, it is also hurt by a wipe before the fog (0.58-0.87), because its
+  memory sets its attention query; a wipe both erases what it remembers and disturbs where it looks. The
+  attention block (E10) separates the two.
 - **The failed LSTM fine-tunes do use their memory** (-0.13 to -0.30): they learned a memory, a worse one.
 
 **E3, linear probes** (`scripts/probe_memory.py`). Ridge regressions, cross-validated over games, decode the

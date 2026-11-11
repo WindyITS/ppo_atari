@@ -215,17 +215,28 @@ def fig_wipes(data: Path, out: Path):
         if key is None or row["view"] != key[1]:
             continue
         rates[key].append([row["totals"][b]["return_rate"] for b in branches])
-    groups = [(a, v) for v in ("fog", "fog_mask") for a in ("cnn", "lstm", "attn_lstm", "curriculum")
-              if (a, v) in rates]
-    fig, axes = plt.subplots(1, len(groups), figsize=(1.8 * len(groups), 2.4), sharey=True, squeeze=False)
-    for ax, key in zip(axes[0], groups):
-        values = np.array(rates[key])
-        for i in range(len(branches)):
-            dots(ax, i, values[:, i], colour(key[0]) if i else NEUTRAL, width=0.6)
-        ax.set_xticks(range(len(branches)), labels, rotation=35, ha="right")
-        ax.set_title(f"{name(key[0])}\n{VIEW_NAMES[key[1]]}", color=INK, fontsize=8)
-        ax.set_ylim(0, 1.03)
-    axes[0][0].set_ylabel("share of balls returned")
+    views, agents = ("fog", "fog_mask"), ("cnn", "lstm", "attn_lstm", "curriculum")
+    fig, axes = plt.subplots(len(views), len(agents), figsize=(7.2, 4.6), sharey=True, sharex=True)
+    for row, view in enumerate(views):
+        for col, agent in enumerate(agents):
+            ax = axes[row][col]
+            ax.set_ylim(0, 1.03)
+            if row == 0:
+                title = "attention + LSTM, from scratch" if agent == "attn_lstm" else name(agent)
+                ax.set_title(title.replace(", ", ",\n"), color=INK, fontsize=8)
+            if col == 0:
+                ax.set_ylabel(f"{VIEW_NAMES[view]}\nshare of balls returned")
+            ax.set_xticks(range(len(branches)), labels, rotation=35, ha="right")
+            if (agent, view) not in rates:
+                ax.text(1.5, 0.5, "no model\nlearned this view", ha="center", va="center", color=INK_2,
+                        fontsize=7)
+                continue
+            values = np.array(rates[(agent, view)])
+            for i in range(len(branches)):
+                dots(ax, i, values[:, i], colour(agent) if i else NEUTRAL, width=0.6, hollow=agent == "curriculum")
+            ax.text(0.02, 0.03, f"{len(values)} model{'s' if len(values) > 1 else ''}", transform=ax.transAxes,
+                    fontsize=6.5, color=INK_2)
+    fig.subplots_adjust(hspace=0.15)
     save(fig, out, "wipes")
 
 
