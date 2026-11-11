@@ -24,7 +24,7 @@ MAX_PARALLEL="${MAX_PARALLEL:-6}"
 TOTAL=15000000
 VIEW_FLAGS_clean=""
 VIEW_FLAGS_fog_mask="--use-fog --mask-enemy"
-failures=0
+pids=()  # every run started, so the end can collect each one's exit status (even if already reaped)
 # A second copy would resume runs that are still going.
 if pgrep -f "[p]ong-rl .*${ARCH}" > /dev/null; then echo "${ARCH} runs are already active; not starting" >&2; exit 1; fi
 
@@ -35,7 +35,7 @@ loads() {  # loads <checkpoint>: true if torch can read it (a power cut may have
 
 wait_for_slot() {
   while (( $(jobs -rp | wc -l) >= MAX_PARALLEL )); do
-    wait -n || failures=$((failures + 1))
+    wait -n || true  # only frees a slot; statuses are counted from pids at the end
   done
 }
 
@@ -58,12 +58,14 @@ launch() {  # launch <run folder> <pong-rl args...>
     echo "Resuming ${run} from ${latest} at $(date -Is)"
     echo "=== resumed from ${latest} at $(date -Is) ===" >> "logs/${run}/train.log"
     uv run pong-rl --resume "${latest}" >> "logs/${run}/train.log" 2>&1 &
+    pids+=($!)
     return
   fi
   echo "Launching ${run} at $(date -Is)"
   echo "=== launched at $(date -Is) ===" >> "logs/${run}/train.log"
   uv run pong-rl --arch "${ARCH}" --total-timesteps "${TOTAL}" --replay-checkpoint-threshold "${REPLAY_THRESHOLD}" \
     "$@" >> "logs/${run}/train.log" 2>&1 &
+  pids+=($!)
 }
 
 # Clean first: those runs are the fine-tunes' parents.
@@ -92,8 +94,9 @@ while [[ -n "${pending// /}" ]]; do
   pending="${waiting}"
   if [[ -n "${pending// /}" ]]; then sleep 120; fi
 done
-while (( $(jobs -rp | wc -l) > 0 )); do
-  wait -n || failures=$((failures + 1))
+failures=0
+for pid in "${pids[@]}"; do
+  wait "${pid}" || failures=$((failures + 1))
 done
 echo "All ${ARCH} runs ended at $(date -Is); ${failures} failed (see logs/<run>/train.log)"
 (( failures == 0 ))
