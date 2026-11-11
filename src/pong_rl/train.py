@@ -31,19 +31,20 @@ from pong_rl.metrics import Episode, EpisodeWindow
 gym.register_envs(ale_py)
 
 # Frames per observation: the CNN sees motion through stacking, the recurrent agents through memory
-FRAME_STACK = {"cnn": 4, "lstm": 1, "attn_lstm": 1, "vit": 4, "vit_lstm": 1}
+FRAME_STACK = {"cnn": 4, "lstm": 1, "attn_lstm": 1, "attn_lstm_wide": 1, "vit": 4, "vit_lstm": 1}
 # Default initial Adam learning rate per architecture (annealed over the run; --learning-rate overrides it).
-# The CNN-based agents keep the 1e-3 the first sweep was trained with. The vision transformers use 2.5e-4,
-# the standard PPO Atari rate (Schulman et al. 2017, CleanRL), inside the 1e-4 to 3e-4 range ViTs usually
-# train well with; 1e-3 is high for a transformer.
-LEARNING_RATE = {"cnn": 1e-3, "lstm": 1e-3, "attn_lstm": 1e-3, "vit": 2.5e-4, "vit_lstm": 2.5e-4}
+# The CNN-based agents keep the 1e-3 the first sweep was trained with (attn_lstm_wide too, so it differs from
+# attn_lstm only in size). The vision transformers use 2.5e-4, the standard PPO Atari rate (Schulman et al.
+# 2017, CleanRL), inside the 1e-4 to 3e-4 range ViTs usually train well with; 1e-3 is high for a transformer.
+LEARNING_RATE = {"cnn": 1e-3, "lstm": 1e-3, "attn_lstm": 1e-3, "attn_lstm_wide": 1e-3, "vit": 2.5e-4,
+                 "vit_lstm": 2.5e-4}
 # Milestones in aggregate environment steps. A from-scratch run saves its untrained weights at 0;
 # a fine-tuning run saves its starting (parent) weights and then every later milestone.
 CHECKPOINT_STEPS = (0, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 7_500_000, 10_000_000, 11_000_000, 12_000_000, 13_000_000, 14_000_000, 15_000_000)
 # Extra milestones for runs that go past 15M steps (e.g. a fine-tune with a 15M budget ends at 25M).
 LONG_RUN_CHECKPOINT_STEPS = (17_500_000, 20_000_000, 22_500_000, 25_000_000, 30_000_000)
 # Top-level agent modules --reinit may reset to fresh (seeded) weights when fine-tuning.
-REINIT_MODULES = ("network", "encoder", "lstm", "actor", "critic", "keys", "values", "query")
+REINIT_MODULES = ("network", "encoder", "lstm", "actor", "critic", "keys", "values", "query", "readout_mlp")
 CONDITION_LABELS = {(False, False): "clean", (False, True): "mask", (True, False): "fog", (True, True): "fog_mask"}
 
 
@@ -124,6 +125,7 @@ def parse_args() -> Args:
         default="cnn",
         help="cnn: Nature CNN on 4 stacked frames; lstm: Nature CNN + LSTM on 1 frame per step; "
              "attn_lstm: LSTM reading the CNN's 7x7 feature map through spatial attention, 1 frame per step; "
+             "attn_lstm_wide: attn_lstm with 8 wider heads and a 512-unit layer after the readout (lstm-sized); "
              "vit: vision transformer on 4 stacked frames; vit_lstm: vision transformer + LSTM on 1 frame per step",
     )
     parser.add_argument("--use-fog", action="store_true", help="Enable FogWrapper on agent half")

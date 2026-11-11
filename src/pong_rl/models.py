@@ -12,6 +12,13 @@ LSTM_HIDDEN_SIZE = 128
 ATTENTION_HEADS = 2
 ATTENTION_KEY_SIZE = 32
 ATTENTION_VALUE_SIZE = 64
+# Wide attention + LSTM (attn_lstm_wide): the same agent with more attention capacity (heads, key and value
+# sizes) and a 512-unit ReLU layer between the attention readout and the LSTM, sized so its parameter count
+# is within 1.5% of the lstm agent's while the memory (LSTM_HIDDEN_SIZE) stays the same.
+WIDE_ATTENTION_HEADS = 8
+WIDE_ATTENTION_KEY_SIZE = 64
+WIDE_ATTENTION_VALUE_SIZE = 320
+WIDE_READOUT_SIZE = 512
 CONV_GRID = 7  # the Nature CNN's last conv layer outputs a 7x7 map for 84x84 inputs
 CONV_CHANNELS = 64
 # Vision transformer: 12x12 patches of the 84x84 frame give the same 7x7 grid (49 tokens) as the CNN.
@@ -265,14 +272,16 @@ class AttentionLSTMAgent(RecurrentAgent):
       4. Softmax over the 49 scores q . k / sqrt(key size) gives the attention weights. q and k are
          layer-normalised per head first (no learned scale), so the scores are not near zero at
          initialisation; without this the weights stay uniform and the agent cannot learn where to look.
-      5. The weighted sums of values, concatenated over heads, are the LSTM's only input.
+      5. The weighted sums of values, concatenated over heads (the readout), are the LSTM's only input,
+         optionally through one ReLU layer of readout_size units (readout_mlp; attn_lstm_wide).
     get_states_and_attention also returns the weights, shaped (T * batch, heads, 49), cells in
     row-major order (row = y, column = x). Its optional `blocked` (bool, (T * batch, 49)) removes cells from
     every head's softmax (an analysis intervention: the agent cannot look there); None changes nothing.
     """
 
     def __init__(self, envs: gym.vector.VectorEnv, heads: int = ATTENTION_HEADS,
-                 key_size: int = ATTENTION_KEY_SIZE, value_size: int = ATTENTION_VALUE_SIZE):
+                 key_size: int = ATTENTION_KEY_SIZE, value_size: int = ATTENTION_VALUE_SIZE,
+                 readout_size: int | None = None):
         super().__init__()
         assert envs.single_observation_space.shape is not None
         self.heads, self.key_size, self.value_size = heads, key_size, value_size
@@ -285,7 +294,10 @@ class AttentionLSTMAgent(RecurrentAgent):
         self.keys = layer_init(nn.Linear(cell_size, heads * key_size), std=1.0)
         self.values = layer_init(nn.Linear(cell_size, heads * value_size), std=1.0)
         self.query = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, heads * key_size), std=1.0)
-        self.lstm = nn.LSTM(heads * value_size, LSTM_HIDDEN_SIZE)
+        # No parameters without readout_size, so attn_lstm checkpoints keep their weight names.
+        self.readout_mlp: nn.Module = nn.Identity() if readout_size is None else nn.Sequential(
+            layer_init(nn.Linear(heads * value_size, readout_size)), nn.ReLU())
+        self.lstm = nn.LSTM(heads * value_size if readout_size is None else readout_size, LSTM_HIDDEN_SIZE)
         init_lstm(self.lstm)
         # The time loop calls torch.lstm_cell with these weights: one layer, biases, no projection.
         assert self.lstm.num_layers == 1 and self.lstm.bias and self.lstm.proj_size == 0
@@ -327,7 +339,7 @@ class AttentionLSTMAgent(RecurrentAgent):
                 scores = scores.masked_fill(masks[t], float("-inf"))
             attention = scores.softmax(dim=-1)
             readout = torch.matmul(attention.unsqueeze(-2), v).reshape(batch, self.heads * self.value_size)
-            h, c = torch.lstm_cell(readout, (h, c), *lstm_weights)
+            h, c = torch.lstm_cell(self.readout_mlp(readout), (h, c), *lstm_weights)
             outputs.append(h)
             weights.append(attention)
         return (torch.stack(outputs).flatten(0, 1), (h.unsqueeze(0), c.unsqueeze(0)),
@@ -338,6 +350,19 @@ class AttentionLSTMAgent(RecurrentAgent):
     ) -> tuple[torch.Tensor, LSTMState]:
         hidden, lstm_state, _ = self.get_states_and_attention(x, lstm_state, done)
         return hidden, lstm_state
+
+
+class WideAttentionLSTMAgent(AttentionLSTMAgent):
+    """attn_lstm with more attention capacity and a 512-unit layer after the readout (attn_lstm_wide).
+
+    A size control: about as many parameters as the lstm agent (attn_lstm has about 9x fewer, as it has no
+    3136 -> 512 dense layer), with the same 128-unit memory, so a difference from attn_lstm is not a matter
+    of parameter count alone.
+    """
+
+    def __init__(self, envs: gym.vector.VectorEnv):
+        super().__init__(envs, heads=WIDE_ATTENTION_HEADS, key_size=WIDE_ATTENTION_KEY_SIZE,
+                         value_size=WIDE_ATTENTION_VALUE_SIZE, readout_size=WIDE_READOUT_SIZE)
 
 
 class ViTAgent(Agent):
@@ -370,7 +395,8 @@ class ViTLSTMAgent(LSTMAgent):
         return hidden, lstm_state, weights
 
 
-AGENTS = {"cnn": Agent, "lstm": LSTMAgent, "attn_lstm": AttentionLSTMAgent, "vit": ViTAgent, "vit_lstm": ViTLSTMAgent}
+AGENTS = {"cnn": Agent, "lstm": LSTMAgent, "attn_lstm": AttentionLSTMAgent, "attn_lstm_wide": WideAttentionLSTMAgent,
+          "vit": ViTAgent, "vit_lstm": ViTLSTMAgent}
 
 
 def make_agent(arch: str, envs: gym.vector.VectorEnv) -> nn.Module:

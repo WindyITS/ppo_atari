@@ -117,7 +117,7 @@ class TrainingTests(unittest.TestCase):
             envs.close()
 
     def test_replaying_each_sequence_reproduces_collection_for_recurrent_agents(self):
-        for arch in ("lstm", "attn_lstm", "vit_lstm"):
+        for arch in ("lstm", "attn_lstm", "attn_lstm_wide", "vit_lstm"):
             with self.subTest(arch=arch):
                 torch.manual_seed(3)
                 children = [gym.wrappers.RecordEpisodeStatistics(ScriptedGame(lengths, timeout_at))
@@ -137,7 +137,7 @@ class TrainingTests(unittest.TestCase):
                     envs.close()
 
     def test_no_done_flags_match_all_zero_flags_including_gradients(self):
-        for arch in ("lstm", "attn_lstm", "vit_lstm"):
+        for arch in ("lstm", "attn_lstm", "attn_lstm_wide", "vit_lstm"):
             with self.subTest(arch=arch):
                 torch.manual_seed(5)
                 spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0, 255, (1,84,84), np.uint8),
@@ -203,7 +203,7 @@ class TrainingTests(unittest.TestCase):
             ParallelEnvPool([lambda: 1 / 0])
 
     def test_checkpointed_replay_matches_full_sequence_outputs_and_gradients(self):
-        for arch in ("lstm", "attn_lstm", "vit_lstm"):
+        for arch in ("lstm", "attn_lstm", "attn_lstm_wide", "vit_lstm"):
             with self.subTest(arch=arch):
                 self.check_checkpointed_replay(arch)
 
@@ -232,7 +232,7 @@ class TrainingTests(unittest.TestCase):
                 torch.testing.assert_close(actual.grad, expected.grad, atol=2e-6, rtol=2e-4)
 
     def test_batched_replay_matches_individual_outputs_and_full_gradients(self):
-        for arch in ("lstm", "attn_lstm", "vit_lstm"):
+        for arch in ("lstm", "attn_lstm", "attn_lstm_wide", "vit_lstm"):
             with self.subTest(arch=arch):
                 torch.manual_seed(11)
                 spaces = SimpleNamespace(
@@ -267,7 +267,7 @@ class TrainingTests(unittest.TestCase):
                         torch.testing.assert_close(parameter.grad, target.grad, atol=4e-6, rtol=5e-4)
 
     def test_all_architectures_update_from_tiny_variable_batches(self):
-        for arch in ("cnn", "lstm", "attn_lstm", "vit", "vit_lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm", "attn_lstm_wide", "vit", "vit_lstm"):
             with self.subTest(arch=arch):
                 channels = 4 if arch in ("cnn", "vit") else 1
                 spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0,255,(channels,84,84), np.uint8),
@@ -293,7 +293,7 @@ class TrainingTests(unittest.TestCase):
                 self.assertEqual(metrics["charts/optimizer_steps"], 4 if arch in ("cnn", "vit") else 2)
 
     def test_unequal_sequences_are_weighted_by_steps_for_all_architectures(self):
-        for arch in ("cnn", "lstm", "attn_lstm", "vit", "vit_lstm"):
+        for arch in ("cnn", "lstm", "attn_lstm", "attn_lstm_wide", "vit", "vit_lstm"):
             with self.subTest(arch=arch):
                 channels = 4 if arch in ("cnn", "vit") else 1
                 spaces = SimpleNamespace(single_observation_space=gym.spaces.Box(0,255,(channels,84,84), np.uint8),

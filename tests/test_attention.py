@@ -6,7 +6,8 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from pong_rl.models import Agent, AttentionLSTMAgent, LSTMAgent, make_agent, zero_lstm_state
+from pong_rl.models import Agent, AttentionLSTMAgent, LSTMAgent, WideAttentionLSTMAgent, make_agent, zero_lstm_state
+from pong_rl.train import FRAME_STACK, LEARNING_RATE, REINIT_MODULES
 
 
 def spaces(channels=1):
@@ -119,7 +120,96 @@ class AttentionAgentTests(unittest.TestCase):
         self.assertEqual(sum(p.numel() for p in self.agent.parameters()), 225_959)
 
 
+class WideAttentionAgentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(1)
+
+    def setUp(self):
+        torch.manual_seed(3)
+        self.agent = make_agent("attn_lstm_wide", spaces())
+
+    def test_size_matches_the_lstm_agent_with_the_same_memory(self):
+        wide = sum(p.numel() for p in self.agent.parameters())
+        lstm = sum(p.numel() for p in LSTMAgent(spaces()).parameters())
+        self.assertEqual(wide, 1_984_551)
+        self.assertLess(abs(wide - lstm) / lstm, 0.015)
+        self.assertEqual(self.agent.lstm.hidden_size, 128)
+
+    def test_eight_heads_and_a_512_unit_relu_layer_feed_the_lstm(self):
+        self.assertIsInstance(self.agent, WideAttentionLSTMAgent)
+        self.assertEqual((self.agent.heads, self.agent.key_size, self.agent.value_size), (8, 64, 320))
+        linear, relu = self.agent.readout_mlp
+        self.assertEqual((linear.in_features, linear.out_features), (8 * 320, 512))
+        self.assertIsInstance(relu, torch.nn.ReLU)
+        self.assertEqual(self.agent.lstm.input_size, 512)
+
+    def test_attention_is_a_distribution_per_head_and_blocking_removes_cells(self):
+        x = frames(3, 2)
+        blocked = torch.zeros(6, 49, dtype=torch.bool)
+        blocked[:, :10] = True
+        with torch.no_grad():
+            hidden, _, weights = self.agent.get_states_and_attention(
+                x, zero_lstm_state(2, torch.device("cpu")), torch.zeros(6))
+            _, _, masked = self.agent.get_states_and_attention(
+                x, zero_lstm_state(2, torch.device("cpu")), torch.zeros(6), blocked=blocked)
+        self.assertEqual((hidden.shape, weights.shape), ((6, 128), (6, 8, 49)))
+        torch.testing.assert_close(weights.sum(-1), torch.ones(6, 8))
+        self.assertTrue(torch.all(masked[:, :, :10] == 0))
+        torch.testing.assert_close(masked.sum(-1), torch.ones(6, 8))
+
+    def test_one_call_over_a_sequence_equals_step_by_step_calls_with_resets(self):
+        steps, batch = 5, 2
+        x = frames(steps, batch)
+        done = torch.zeros(steps * batch)
+        done[2 * batch + 1] = 1
+        start = (torch.randn(1, batch, 128), torch.randn(1, batch, 128))
+        with torch.no_grad():
+            hidden, final = self.agent.get_states(x, start, done)
+            state, outputs = start, []
+            for t in range(steps):
+                rows = slice(t * batch, (t + 1) * batch)
+                out, state = self.agent.get_states(x[rows], state, done[rows])
+                outputs.append(out)
+        torch.testing.assert_close(hidden, torch.cat(outputs))
+        for actual, expected in zip(final, state):
+            torch.testing.assert_close(actual, expected)
+
+    def test_gradients_reach_every_parameter(self):
+        _, logp, entropy, value, _ = self.agent.get_action_and_value(
+            frames(4, 2), (torch.randn(1, 2, 128), torch.randn(1, 2, 128)), torch.zeros(8))
+        (logp.sum() + entropy.sum() + value.sum()).backward()
+        for name, parameter in self.agent.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+            self.assertGreater(parameter.grad.abs().sum().item(), 0, name)
+
+    def test_checkpoint_round_trip_is_strict_and_not_interchangeable_with_attn_lstm(self):
+        state = self.agent.state_dict()
+        restored = make_agent("attn_lstm_wide", spaces())
+        restored.load_state_dict(state, strict=True)
+        x = frames(2, 1)
+        with torch.no_grad():
+            expected, _ = self.agent.get_states(x, zero_lstm_state(1, torch.device("cpu")), torch.zeros(2))
+            actual, _ = restored.get_states(x, zero_lstm_state(1, torch.device("cpu")), torch.zeros(2))
+        torch.testing.assert_close(actual, expected)
+        with self.assertRaises(RuntimeError):
+            make_agent("attn_lstm", spaces()).load_state_dict(state, strict=True)
+
+    def test_training_defaults_match_attn_lstm(self):
+        self.assertEqual(FRAME_STACK["attn_lstm_wide"], FRAME_STACK["attn_lstm"])
+        self.assertEqual(LEARNING_RATE["attn_lstm_wide"], LEARNING_RATE["attn_lstm"])
+        self.assertIn("readout_mlp", REINIT_MODULES)
+
+
 class ExistingCheckpointCompatibilityTests(unittest.TestCase):
+    def test_attn_lstm_weight_names_are_unchanged(self):
+        self.assertEqual(list(AttentionLSTMAgent(spaces()).state_dict()),
+                         ["encoder.0.weight", "encoder.0.bias", "encoder.2.weight", "encoder.2.bias",
+                          "encoder.4.weight", "encoder.4.bias", "keys.weight", "keys.bias", "values.weight",
+                          "values.bias", "query.weight", "query.bias", "lstm.weight_ih_l0", "lstm.weight_hh_l0",
+                          "lstm.bias_ih_l0", "lstm.bias_hh_l0", "actor.weight", "actor.bias", "critic.weight",
+                          "critic.bias"])
+
     def test_cnn_and_lstm_weight_names_and_sizes_are_unchanged(self):
         cnn = Agent(spaces(4))
         lstm = LSTMAgent(spaces(1))
