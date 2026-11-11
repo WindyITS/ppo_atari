@@ -53,7 +53,7 @@ LSTM_BRANCHES = ("control", "control_b", "erase_ball")
 
 
 def branches_for(arch: str) -> tuple:
-    return BRANCHES if arch == "attn_lstm" else LSTM_BRANCHES
+    return BRANCHES if arch.startswith("attn_lstm") else LSTM_BRANCHES
 
 
 def erase_ball(obs: np.ndarray) -> np.ndarray:

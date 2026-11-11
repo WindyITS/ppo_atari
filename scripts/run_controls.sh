@@ -23,7 +23,7 @@ launch() {  # launch <arch> <seed> <tag> [extra args...]
     # Interrupted (e.g. a power cut): continue from the latest milestone with --resume, which keeps the
     # folder, step counter and learning-rate schedule and never rewrites an existing file.
     local latest
-    latest="$(ls "checkpoints/${run}"/step_*.pt 2>/dev/null | sort | tail -n 1)"
+    latest="$(ls "checkpoints/${run}"/step_*.pt 2>/dev/null | sort | tail -n 1 || true)"
     if [[ -z "${latest}" ]]; then echo "No milestone to resume ${run} from; inspect it by hand" >&2; return; fi
     echo "Resuming ${run} from ${latest}"
     echo "=== resumed from ${latest} at $(date -Is) ===" >> "logs/${run}/train.log"

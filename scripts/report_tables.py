@@ -253,7 +253,7 @@ def main():
     if controls:
         curves = collections.defaultdict(dict)
         for r in sweep + controls:
-            if r["train_view"] != "fog_mask" or r["eval_view"] != "fog_mask" or r["arch"] == "attn_lstm":
+            if r["train_view"] != "fog_mask" or r["eval_view"] != "fog_mask" or r["arch"].startswith("attn_lstm"):
                 continue
             step = r["checkpoint_step"] if r["checkpoint_step"] is not None else r["training_target_timesteps"]
             run = r["run"].split("/")

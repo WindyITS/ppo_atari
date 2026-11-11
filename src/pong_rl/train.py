@@ -291,7 +291,15 @@ def save_checkpoint(agent, args, run, global_step, updates, optimizer_steps, che
                         # Adam's moments, so an interrupted run can be resumed exactly (--resume)
                         **({"optimizer_state_dict": optimizer.state_dict()} if optimizer is not None else {}),
                         "resumed_from": run.get("resumed_from")}, stream)
+            # On disk before the rename, so a power cut cannot leave an empty or partial checkpoint behind it.
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -408,7 +416,8 @@ def main():
 
     agent = make_agent(args.arch, envs).to(device)
     if parent_state is not None and args.reinit:
-        unknown = [name for name in args.reinit if not isinstance(getattr(agent, name, None), torch.nn.Module)]
+        unknown = [name for name in args.reinit if not isinstance(getattr(agent, name, None), torch.nn.Module)
+                   or not any(True for _ in getattr(agent, name).parameters())]
         if unknown:
             raise ValueError(f"--reinit: {args.arch} has no module {', '.join(unknown)}")
         # The agent was just built after seeding, so the skipped modules keep fresh, seeded weights.

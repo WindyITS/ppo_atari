@@ -13,8 +13,8 @@ ATTENTION_HEADS = 2
 ATTENTION_KEY_SIZE = 32
 ATTENTION_VALUE_SIZE = 64
 # Wide attention + LSTM (attn_lstm_wide): the same agent with more attention capacity (heads, key and value
-# sizes) and a 512-unit ReLU layer between the attention readout and the LSTM, sized so its parameter count
-# is within 1.5% of the lstm agent's while the memory (LSTM_HIDDEN_SIZE) stays the same.
+# sizes, ReLU values) and a 512-unit ReLU layer between the attention readout and the LSTM, sized so its
+# parameter count is within 1.5% of the lstm agent's while the memory (LSTM_HIDDEN_SIZE) stays the same.
 WIDE_ATTENTION_HEADS = 8
 WIDE_ATTENTION_KEY_SIZE = 64
 WIDE_ATTENTION_VALUE_SIZE = 320
@@ -273,7 +273,10 @@ class AttentionLSTMAgent(RecurrentAgent):
          layer-normalised per head first (no learned scale), so the scores are not near zero at
          initialisation; without this the weights stay uniform and the agent cannot learn where to look.
       5. The weighted sums of values, concatenated over heads (the readout), are the LSTM's only input,
-         optionally through one ReLU layer of readout_size units (readout_mlp; attn_lstm_wide).
+         optionally through one ReLU layer of readout_size units (readout_mlp; attn_lstm_wide). Such a
+         layer needs nonlinear values (relu_values): otherwise values, the attention average and the layer's
+         linear map compose into a single linear map of each head's 66-d attended cell, and most of their
+         parameters add no capacity.
     get_states_and_attention also returns the weights, shaped (T * batch, heads, 49), cells in
     row-major order (row = y, column = x). Its optional `blocked` (bool, (T * batch, 49)) removes cells from
     every head's softmax (an analysis intervention: the agent cannot look there); None changes nothing.
@@ -281,7 +284,7 @@ class AttentionLSTMAgent(RecurrentAgent):
 
     def __init__(self, envs: gym.vector.VectorEnv, heads: int = ATTENTION_HEADS,
                  key_size: int = ATTENTION_KEY_SIZE, value_size: int = ATTENTION_VALUE_SIZE,
-                 readout_size: int | None = None):
+                 readout_size: int | None = None, relu_values: bool = False):
         super().__init__()
         assert envs.single_observation_space.shape is not None
         self.heads, self.key_size, self.value_size = heads, key_size, value_size
@@ -292,7 +295,10 @@ class AttentionLSTMAgent(RecurrentAgent):
                              persistent=False)
         cell_size = CONV_CHANNELS + 2
         self.keys = layer_init(nn.Linear(cell_size, heads * key_size), std=1.0)
-        self.values = layer_init(nn.Linear(cell_size, heads * value_size), std=1.0)
+        # Per-cell values: linear (attn_lstm; checkpoint names values.weight/bias) or a ReLU embedding
+        # (values.0.*), which makes the readout a nonlinear summary of the cells.
+        self.values: nn.Module = layer_init(nn.Linear(cell_size, heads * value_size), std=1.0) if not relu_values \
+            else nn.Sequential(layer_init(nn.Linear(cell_size, heads * value_size)), nn.ReLU())
         self.query = layer_init(nn.Linear(LSTM_HIDDEN_SIZE, heads * key_size), std=1.0)
         # No parameters without readout_size, so attn_lstm checkpoints keep their weight names.
         self.readout_mlp: nn.Module = nn.Identity() if readout_size is None else nn.Sequential(
@@ -353,7 +359,8 @@ class AttentionLSTMAgent(RecurrentAgent):
 
 
 class WideAttentionLSTMAgent(AttentionLSTMAgent):
-    """attn_lstm with more attention capacity and a 512-unit layer after the readout (attn_lstm_wide).
+    """attn_lstm with more attention capacity (8 heads, larger keys, 320-unit ReLU values) and a 512-unit ReLU
+    layer after the readout (attn_lstm_wide).
 
     A size control: about as many parameters as the lstm agent (attn_lstm has about 9x fewer, as it has no
     3136 -> 512 dense layer), with the same 128-unit memory, so a difference from attn_lstm is not a matter
@@ -362,7 +369,7 @@ class WideAttentionLSTMAgent(AttentionLSTMAgent):
 
     def __init__(self, envs: gym.vector.VectorEnv):
         super().__init__(envs, heads=WIDE_ATTENTION_HEADS, key_size=WIDE_ATTENTION_KEY_SIZE,
-                         value_size=WIDE_ATTENTION_VALUE_SIZE, readout_size=WIDE_READOUT_SIZE)
+                         value_size=WIDE_ATTENTION_VALUE_SIZE, readout_size=WIDE_READOUT_SIZE, relu_values=True)
 
 
 class ViTAgent(Agent):

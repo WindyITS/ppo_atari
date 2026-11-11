@@ -136,6 +136,12 @@ class WideAttentionAgentTests(unittest.TestCase):
         self.assertLess(abs(wide - lstm) / lstm, 0.015)
         self.assertEqual(self.agent.lstm.hidden_size, 128)
 
+    def test_the_readout_is_a_nonlinear_summary_of_the_cells(self):
+        # With linear values, values -> attention average -> readout layer would be one linear map.
+        linear, relu = self.agent.values
+        self.assertEqual((linear.in_features, linear.out_features), (66, 8 * 320))
+        self.assertIsInstance(relu, torch.nn.ReLU)
+
     def test_eight_heads_and_a_512_unit_relu_layer_feed_the_lstm(self):
         self.assertIsInstance(self.agent, WideAttentionLSTMAgent)
         self.assertEqual((self.agent.heads, self.agent.key_size, self.agent.value_size), (8, 64, 320))
