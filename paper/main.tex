@@ -89,10 +89,13 @@ We train each on all four combinations of fog and mask and then look inside them
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{views}
-  \caption{The four views of the same moment of a game. The fog blanks the agent's half of the court
-    (columns 42--71 of the $84\times84$ frame); the mask blanks the opponent's paddle (columns 6--11). Dashed
-    boxes mark the hidden regions; the circle marks the ball where it is hidden. The agent (right) always sees
+  \includegraphics[width=\linewidth]{environments}
+  \caption{The four views of Pong. Top: one ball flight on the game screen, from the opponent's paddle (left)
+    to the agent's (right), drawn as a time-lapse trail. Solid marks show where the agent sees the ball, dotted
+    ones where its view hides it. Dashed boxes mark the hidden regions, which the agent's view paints in the
+    court's colour: the fog covers the agent's half of the court, and the mask covers the opponent's paddle.
+    This flight bounces off the top wall inside the fog. Bottom: the $84\times84$ grayscale frame the agent
+    receives at one moment of the flight, with the ball ringed (dotted where hidden). The agent always sees
     its own paddle.}
   \label{fig:views}
 \end{figure}

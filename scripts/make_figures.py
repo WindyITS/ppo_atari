@@ -13,6 +13,9 @@ checkpoints. "Curriculum" is attn_lstm trained on clean Pong for 10M steps, then
     wipes    balls returned when the memory is wiped before, at and inside the fog (E4)
     probes   R^2 of a linear probe for the hidden ball's height: trained vs untrained network (E3, E3b)
     block    the attention agent on fog + hidden paddle: attention blocked on the ball before the fog (E10)
+    attention  where the attention agent looks during a flight (E13; attention_maps.json, attention_strip.npz)
+    environments  the four views in colour: one flight as a time-lapse trail on the game screen, and the 84x84
+                  frame the agent receives (needs no data: a scripted player plays the game)
 """
 
 import argparse
@@ -386,8 +389,150 @@ def fig_attention(data: Path, out: Path):
     save(fig, out, "attention")
 
 
+# --- environments: the game screen in colour ----------------------------------------------------------------
+
+SCREEN_COURT = (34, 194)          # rows of the 210x160 screen between the walls
+SCREEN_BG = (144, 72, 17)
+SCREEN_BALL = (236, 236, 236)
+TO_SCREEN = 160 / 84              # AtariPreprocessing resizes the whole 210x160 screen to 84x84
+SCREEN_FOG = (42 * TO_SCREEN, 72 * TO_SCREEN)     # columns 42-71 of the 84x84 frame
+SCREEN_MASK = (6 * TO_SCREEN, 12 * TO_SCREEN)     # columns 6-11
+
+
+def screen_ball(rgb: np.ndarray) -> tuple[float, float] | None:
+    """Centre (x, y) of the ball on the 210x160 screen, None if it is not on the court."""
+    rows = slice(*SCREEN_COURT)
+    ys, xs = np.where((rgb[rows] == SCREEN_BALL).all(axis=-1))
+    if len(xs) == 0:
+        return None
+    return float(xs.mean()), float(ys.mean() + SCREEN_COURT[0])
+
+
+def record_flight(seed: int = 3, warmup: int = 15):
+    """Four lockstep games (one per view), played by a scripted player that moves its paddle towards the
+    ball's true height, until one flight from the opponent's paddle to a return by the agent is complete.
+    Returns the colour screens, the ball's screen positions and each view's 84x84 frames, one per step."""
+    from pong_rl.analysis import scene
+    from pong_rl.envs import make_env
+    flags = {"clean": (False, False), "mask": (False, True), "fog": (True, False), "fog_mask": (True, True)}
+    envs = {v: make_env("ALE/Pong-v5", 0, False, "figure", use_fog=f, mask_enemy=m, frame_stack=1,
+                        tap_clean_frame=True)() for v, (f, m) in flags.items()}
+    seen = {v: env.reset(seed=seed)[0] for v, env in envs.items()}
+    screens, balls, frames = [], [], {v: [] for v in VIEWS}
+    start = None
+    try:
+        for t in range(5000):
+            clean = np.asarray(envs["clean"].get_wrapper_attr("clean_frame"))
+            where = scene.locate(clean)
+            rgb = envs["clean"].unwrapped.ale.getScreenRGB().copy()
+            screens.append(rgb)
+            balls.append(screen_ball(rgb))
+            for v in VIEWS:
+                frames[v].append(np.asarray(seen[v])[-1].copy())
+            x = [b[0] if b else np.nan for b in balls]
+            if t > warmup and start is None and len(x) > 2 and x[-2] == x[-2] and x[-1] > x[-2] and x[-2] < 40:
+                start = t - 1  # the ball has just left the opponent's paddle
+            if start is not None and len(x) > start + 3 and x[-1] == x[-1] and x[-2] == x[-2]:
+                if x[-1] < x[-2] and x[-2] > SCREEN_FOG[1]:  # moving back left after the agent's paddle
+                    end = t + 3
+                    if end - start > 12:
+                        break
+                    start = None
+                if x[-1] < x[-2] and x[-2] < SCREEN_FOG[0]:  # turned before the agent: not this flight
+                    start = None
+            target = where["ball_y"] if where["ball_y"] == where["ball_y"] else 46.0
+            agent = where["agent_y"]
+            action = 0 if agent != agent or abs(target - agent) < 2 else (2 if target < agent else 3)
+            for v, env in envs.items():
+                obs, _, terminated, truncated, _ = env.step(action)
+                seen[v] = obs
+                if terminated or truncated:
+                    raise RuntimeError("the game ended before a returned flight; try another seed")
+        else:
+            raise RuntimeError("no returned flight found")
+        for _ in range(3):  # a few steps of the return
+            for v, env in envs.items():
+                seen[v] = env.step(0)[0]
+            rgb = envs["clean"].unwrapped.ale.getScreenRGB().copy()
+            screens.append(rgb)
+            balls.append(screen_ball(rgb))
+            for v in VIEWS:
+                frames[v].append(np.asarray(seen[v])[-1].copy())
+    finally:
+        for env in envs.values():
+            env.close()
+    span = slice(start, len(screens))
+    return screens[span], balls[span], {v: f[span] for v, f in frames.items()}
+
+
+def fig_environments(data: Path, out: Path):
+    screens, balls, frames = record_flight()
+    hit = max(range(len(balls)), key=lambda i: balls[i][0] if balls[i] else -1)  # at the agent's paddle
+    middle = min((i for i, b in enumerate(balls) if b and SCREEN_FOG[0] + 25 < b[0]), default=hit)
+    hidden_fog = {"fog", "fog_mask"}
+    hidden_mask = {"mask", "fog_mask"}
+    fig, axes = plt.subplots(2, 4, figsize=(7.2, 4.35), gridspec_kw={"height_ratios": (210 / 160, 1),
+                                                                    "hspace": 0.08, "wspace": 0.06})
+    for column, view in enumerate(VIEWS):
+        ax = axes[0, column]
+        background = screens[hit].copy()
+        # The screen as the agent's view paints it: the fog and the mask in the court's colour.
+        court = slice(SCREEN_COURT[0], SCREEN_COURT[1])
+        if view in hidden_fog:
+            background[court, int(round(SCREEN_FOG[0])):int(round(SCREEN_FOG[1]))] = SCREEN_BG
+        if view in hidden_mask:
+            background[court, int(round(SCREEN_MASK[0])):int(round(SCREEN_MASK[1]))] = SCREEN_BG
+        ax.imshow(background, interpolation="nearest")
+        for x0, x1, hidden in ((*SCREEN_FOG, view in hidden_fog), (*SCREEN_MASK, view in hidden_mask)):
+            if hidden:
+                ax.add_patch(Rectangle((x0 - 0.5, SCREEN_COURT[0] - 0.5), x1 - x0, SCREEN_COURT[1] - SCREEN_COURT[0],
+                                       facecolor=(1, 1, 1, 0.07), edgecolor="white", linewidth=0.9,
+                                       linestyle=(0, (3, 2))))
+        trail = [(i, b) for i, b in enumerate(balls) if b]
+        for k, (i, (x, y)) in enumerate(trail):
+            alpha = 0.35 + 0.65 * k / max(1, len(trail) - 1)
+            hidden = (view in hidden_fog and SCREEN_FOG[0] <= x < SCREEN_FOG[1]) or \
+                (view in hidden_mask and SCREEN_MASK[0] <= x < SCREEN_MASK[1])
+            if hidden:
+                ax.add_patch(Circle((x, y), 2.6, fill=False, edgecolor="white", alpha=alpha, linewidth=0.8,
+                                    linestyle=(0, (1, 1))))
+            else:
+                ax.add_patch(Rectangle((x - 1.5, y - 2), 3, 4, color="white", alpha=alpha, linewidth=0))
+        ax.set_title(VIEW_NAMES[view], color=INK)
+        if view == "fog":
+            ax.text(np.mean(SCREEN_FOG), SCREEN_COURT[1] - 4, "fog", color="white", ha="center", va="bottom",
+                    fontsize=7.5)
+        if view == "mask":
+            ax.text(SCREEN_MASK[1] + 2, SCREEN_COURT[1] - 4, "hidden\npaddle", color="white", ha="left",
+                    va="bottom", fontsize=7)
+        if view == "clean":
+            ax.text(20, SCREEN_COURT[1] - 4, "opponent", color="#f2c9a8", ha="left", va="bottom", fontsize=7)
+            ax.text(141, SCREEN_COURT[1] - 4, "agent", color="#bfe6bf", ha="right", va="bottom", fontsize=7)
+        small = axes[1, column]
+        small.imshow(frames[view][middle], cmap="gray", vmin=0, vmax=255, interpolation="nearest")
+        for (x0, x1), hidden in (((42, 72), view in hidden_fog), ((6, 12), view in hidden_mask)):
+            if hidden:  # same regions on the agent's frame (rows 14-76: the court)
+                small.add_patch(Rectangle((x0 - 0.5, 13.5), x1 - x0, 63, fill=False, edgecolor="white",
+                                          alpha=0.6, linewidth=0.8, linestyle=(0, (3, 2))))
+        if balls[middle]:  # the ball is a couple of pixels here: ring it (dotted where this view hides it)
+            x, y = balls[middle][0] / TO_SCREEN, balls[middle][1] * 84 / 210
+            in_fog = view in hidden_fog and 42 <= x < 72
+            small.add_patch(Circle((x, y), 3.2, fill=False, edgecolor=TARGET_COLOURS["ball"], linewidth=1.0,
+                                   linestyle=(0, (1.5, 1)) if in_fog else "-"))
+        for a in (ax, small):
+            a.set_xticks([])
+            a.set_yticks([])
+            a.grid(False)
+            for spine in a.spines.values():
+                spine.set_visible(False)
+    axes[1, 0].set_ylabel("what the agent receives\n(84x84, one frame)", color=INK_2, fontsize=7.5)
+    axes[0, 0].set_ylabel("one flight on the game screen", color=INK_2, fontsize=7.5)
+    save(fig, out, "environments")
+
+
 FIGURES = {"views": fig_views, "returns": fig_returns, "shift": fig_shift, "wipes": fig_wipes,
-           "probes": fig_probes, "block": fig_block, "attention": fig_attention}
+           "probes": fig_probes, "block": fig_block, "attention": fig_attention,
+           "environments": fig_environments}
 
 
 def main():
