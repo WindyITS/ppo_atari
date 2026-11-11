@@ -37,6 +37,7 @@ Rules: never delete or overwrite existing code or checkpoints; new runs use tagg
 
 | E10 | Q4 | Attention block: replay each incoming flight with the attention-LSTM unable to attend to the ball's 3x3 cells before the fog (vs a same-size sham block); measure memory probe error inside the fog and return rate; plus attention-on-ball vs probe error per flight | `analysis/attention_block.jsonl` |
 | E11 | Q3, Q4 | Scripted reference players on the evaluation games: copy the enemy paddle (the shortcut alone), go to the ball's last seen height, extrapolate its seen path (ideal short memory), the same with no fog | `analysis/scripted_baselines.jsonl` |
+| E13 | Q2, Q4 | Attention over a flight: attention weight of attn_lstm on the ball, own paddle and enemy paddle, aligned on fog entry, plus one recorded flight (`scripts/attention_maps.py`) | `analysis/attention_maps.json` |
 | E12 | Q5 | Size control for the attention agent: attn_lstm_wide (8 heads, key 64, ReLU values of 320 units, a 512-unit ReLU layer after the readout; 1.98M parameters vs lstm 2.01M, same 128-unit memory) trained on fog_mask from scratch and fine-tuned from its clean 10M checkpoint, 3 seeds, the attn_lstm protocol (`scripts/run_wide.sh`); other views only if it learns | `checkpoints/{scratch,finetune}/attn_lstm_wide/` |
 
 Decision rules are written in each experiment's Flywheel node before results come in.
