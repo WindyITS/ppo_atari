@@ -27,6 +27,10 @@ CNN, LSTM and attention-LSTM agents learn to play"). Runs interrupted by power c
    fine-tuning recipe: given the scratch budget and learning-rate schedule, every fine-tune wins, the LSTM's
    mostly faster than from scratch and the CNN's more reliably.
 7. **Every model is a specialist.** Fog + mask models lose on every other view, clean ones on every fogged one.
+8. **Size explains only part of the attention agent's failure from scratch (E12).** A wider attention-LSTM as
+   large as the LSTM (1.98M vs 2.01M parameters) no longer stalls on fog + mask: all three seeds leave -20,
+   one wins (+19.5) and two are still improving at 15M (-11.1, -4.2; mean +1.4 against -7.0 for the small
+   agent). The LSTM wins with every seed after 2-3M steps. Its curriculum wins with every seed, as before.
 
 ## Setup in one paragraph
 
@@ -62,6 +66,22 @@ Frozen models on their own training view (final checkpoints; mean return over 3 
   still wins (+20.0 to +20.7), the clean LSTM is mixed (+18.8, -10.9, +6.8) and the clean attention-LSTM
   collapses (-15 to -21). Every fog + mask model, of every architecture, loses about -20 on every other view,
   including clean: seeing the ball in its own half is out of distribution for them.
+- **E12, size control (2026-11-12).** attn_lstm_wide (1.98M parameters, 8 heads, same 128-unit memory),
+  frozen evaluation, 30 games:
+
+  | run | clean | mask | fog | fog + mask |
+  |---|---|---|---|---|
+  | scratch clean s1/s2/s3 | +18.8 / +20.0 / +18.7 | +15.7 / -20.2 / -6.8 | about -20.6 | about -20.8 |
+  | scratch fog + mask s1/s2/s3 | about -20 | about -20 | -19.5 / -16.7 / -21.0 | **+19.5 / -11.1 / -4.2** |
+  | curriculum fog + mask s1/s2/s3 | about -20.6 | about -20.0 | about -20.7 | **+18.1 / +20.6 / +19.1** |
+
+  The small agent's failed seeds sat at -20 for all 15M steps; the wide ones climb (training return per 1M,
+  s2: -20 until 3M, -16 at 9M, -11 at 15M; s3: -20 until 8M, then -17, -11, -6, -3 at 15M). The wide seed
+  that wins turns positive after 3.2M steps; the curriculum fine-tunes after 1.5-2.9M (small agent 1.7-2.3M).
+  Like the small clean agent, two of three wide clean models lose without the enemy paddle. Scratch fog + mask
+  seed 2 stopped on a non-finite PPO loss at 1.34M and was resumed by hand from its 1.0M checkpoint (fresh
+  optimiser), see its train.log. Since the wide agent does not reliably learn fog + mask from scratch, it was
+  not trained on mask or fog.
 - **Fog-only models need the enemy paddle.** Fog-trained models of all three architectures (scratch and
   fine-tuned) lose about -20 on fog + mask, i.e. when only the enemy paddle is taken away. This is the first
   evidence for the shortcut of Q3: under fog, the agents read where the ball went off the enemy paddle.

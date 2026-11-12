@@ -38,7 +38,9 @@ ball disappears cuts the share of balls returned from 98\% to 30\%. The attentio
 its attention let in: blocking its attention to the ball just before the fog erases the ball from its
 memory and makes it miss. The memoryless CNN finds another way. It moves early and lets its own paddle
 carry the information through the fog. The attention agent rarely learns the hardest view from scratch (1
-of 3 seeds), but always learns it after pre-training on the clean game.
+of 3 seeds), but always learns it after pre-training on the clean game. A wider attention agent, as large
+as the LSTM agent, no longer stalls but is still far slower than the LSTM, so size explains only part of
+the gap.
 \end{abstract}
 
 \section{Introduction}
@@ -358,9 +360,24 @@ The attention agent is 7--9 times smaller than the other two, so its failure fro
 of size. We test this with a wider attention agent of 1.98M parameters, within 1.1\% of the LSTM agent. It
 keeps the same 128-unit memory but has eight heads, ReLU values of 320 units and a 512-unit ReLU layer after
 the readout. We train it with exactly the protocol above: from scratch on clean and on fog + hidden paddle,
-and the 10M + 5M curriculum, with three seeds each. \pending{Results pending: the runs are training. In
-training, one of three from-scratch seeds already wins fog + hidden paddle at 6M steps. Report the frozen
-evaluation and whether size alone explains the failure.}
+and the 10M + 5M curriculum, with three seeds each.
+
+Size explains part of the failure, but not all of it.
+\begin{itemize}
+  \item \textbf{The wide agent plays like the small one wherever the small one already succeeded.} It wins
+    the clean view with every seed ($+18.7$ to $+20.0$). The curriculum again wins fog + hidden paddle with
+    every seed ($+18.1$ to $+20.6$), turning positive after 1.5--2.9M fine-tuning steps (small agent:
+    1.7--2.3M).
+  \item \textbf{From scratch on fog + hidden paddle it no longer gets stuck.} Two small seeds stayed at
+    $-20$ for all 15M steps. All three wide seeds leave it. One wins ($+19.5$, positive after 3.2M steps), and
+    the other two are still improving when training stops ($-11.1$ and $-4.2$ in evaluation). The mean return
+    rises from $-7.0$ to $+1.4$.
+  \item \textbf{It is still much slower than the LSTM agent of the same size}, which wins with every seed
+    after 2--3M steps.
+\end{itemize}
+Capacity, then, is part of why the small attention agent stalls. But routing the frame through attention
+still makes the memory harder to learn from scratch than a plain LSTM at the same size, and clean
+pre-training remains the reliable way to learn it.
 
 \section{Related work}
 
@@ -381,7 +398,9 @@ under fog and how it is read. Clean-then-hard training is a simple curriculum \c
   \item \textbf{Scale.} We use three seeds per condition and a single game. Several findings rest on one
     or two models, such as the attention agent from scratch and the fog-only attention agents.
   \item \textbf{Size confound.} The attention agent differs from the others in size as well as in
-    attention; Section~\ref{sec:wide} addresses this.
+    attention. The wider agent of Section~\ref{sec:wide} removes the size difference for training, but our
+    probes, wipes and attention analyses use only the small agent. Its two unfinished from-scratch seeds
+    might win with a longer budget.
   \item \textbf{Evaluation.} It uses the stochastic policy, against the built-in opponent only.
   \item \textbf{Mechanism.} Reading the shortcut as an inference from where the ball met the opponent's
     paddle fits our data but is not tested directly.
