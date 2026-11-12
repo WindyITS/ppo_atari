@@ -4,6 +4,9 @@
 #   scratch   clean and fog_mask from random weights, 15M steps each
 #   finetune  the clean run's step_10.0M.pt fine-tuned on fog_mask up to 15M (5M steps; fresh Adam, learning
 #             rate annealed over the fine-tune), mirroring checkpoints/finetune/attn_lstm/clean_10.0M_to_fog_mask
+# VIEWS (scratch views) and FT_VIEWS (fine-tune targets) widen the sweep; E12b trains the remaining views:
+#   VIEWS="clean mask fog fog_mask" FT_VIEWS="mask fog fog_mask" nohup bash scripts/run_wide.sh >> logs/wide.log 2>&1 &
+# Finished runs are skipped, so listing the E12 views again changes nothing for them.
 # At most MAX_PARALLEL runs at a time (the host loses power under heavy load); scratch runs go first, and a
 # fine-tune starts once its parent's step_10.0M.pt exists and a slot is free.
 # Rerunning the script skips finished runs and resumes interrupted ones from their newest milestone that
@@ -22,7 +25,11 @@ ARCH=attn_lstm_wide
 SEEDS="${SEEDS:-1 2 3}"
 MAX_PARALLEL="${MAX_PARALLEL:-6}"
 TOTAL=15000000
+VIEWS="${VIEWS:-clean fog_mask}"
+FT_VIEWS="${FT_VIEWS:-fog_mask}"
 VIEW_FLAGS_clean=""
+VIEW_FLAGS_mask="--mask-enemy"
+VIEW_FLAGS_fog="--use-fog"
 VIEW_FLAGS_fog_mask="--use-fog --mask-enemy"
 pids=()  # every run started, so the end can collect each one's exit status (even if already reaped)
 # A second copy would resume runs that are still going.
@@ -68,8 +75,8 @@ launch() {  # launch <run folder> <pong-rl args...>
   pids+=($!)
 }
 
-# Clean first: those runs are the fine-tunes' parents.
-for view in clean fog_mask; do
+# Clean first (list it first in VIEWS): those runs are the fine-tunes' parents.
+for view in ${VIEWS}; do
   for seed in ${SEEDS}; do
     flags="VIEW_FLAGS_${view}"
     # shellcheck disable=SC2086  # the view flags are meant to split into words
@@ -84,9 +91,12 @@ while [[ -n "${pending// /}" ]]; do
   for seed in ${pending}; do
     parent="checkpoints/scratch/${ARCH}/clean/seed_${seed}/step_10.0M.pt"
     if [[ -f "${parent}" ]]; then
-      # shellcheck disable=SC2086
-      launch "finetune/${ARCH}/clean_10.0M_to_fog_mask/seed_${seed}" --seed "${seed}" \
-        ${VIEW_FLAGS_fog_mask} --init-from "${parent}"
+      for view in ${FT_VIEWS}; do
+        flags="VIEW_FLAGS_${view}"
+        # shellcheck disable=SC2086
+        launch "finetune/${ARCH}/clean_10.0M_to_${view}/seed_${seed}" --seed "${seed}" \
+          ${!flags} --init-from "${parent}"
+      done
     else
       waiting="${waiting} ${seed}"
     fi
