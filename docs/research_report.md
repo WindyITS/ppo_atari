@@ -215,6 +215,17 @@ Wide fog + mask models: scratch s1 (wins), s2 / s3 (still learning, -11.1 / -4.2
   collapses without it (-20.2), like the small clean agent. s1 also has one (0.56) but a head that tracks the
   ball strongly (0.93), and it keeps winning (+15.7). s3 barely attends to either (0.15 ball, 0.19 paddle)
   and is in between (-6.8).
+- **E3b untrained baseline** (`random_control.py`, rows in probes_random.jsonl): the untrained wide network
+  reads the hidden ball better than the small untrained one (overall R^2 0.31-0.83 vs 0.18-0.59), being a
+  larger random projection. Deep in the fog (8+ steps) the trained memory still clearly wins for the
+  curriculum models: 0.92 / 0.97 / 0.93 against 0.51 / 0.70 / 0.19 untrained (small curriculum 0.89-0.98 vs
+  0.27-0.53; lstm scratch 0.87-0.97 vs 0.38-0.58). The one wide model that wins from scratch has a weak
+  margin (0.80 vs 0.64), and it moves its paddle early: 4% of its movement in the last 4 steps (cnn
+  scratch 4-19%, lstm s1 5%), though still 14 px from the exit 4 steps in (cnn 6-10 px). So it is not a clean
+  case of the CNN's early commitment, and its memory claim is weaker than the curriculum models'.
+- The exit-height probe of wide scratch s3 gave R^2 0.73 in probes.jsonl but -115 in probes_random.jsonl. The
+  seeded fold split changes when the random input is added, and with that split the ridge fit diverges for
+  this model. Its current-height probe is stable (0.87 in both); the paper uses only that probe.
 - The probes file has one line of NUL bytes (line 64, an earlier power cut); readers skip it and no row is
   missing from the analyses above.
 
