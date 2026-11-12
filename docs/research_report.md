@@ -211,9 +211,10 @@ Wide fog + mask models: scratch s1 (wins), s2 / s3 (still learning, -11.1 / -4.2
 - **Mean attention over 8 heads understates tracking.** Averaged over heads, the wide models look at the ball
   only 0.04-0.66 before the fog. Their best head looks 0.69-0.97, in line with the small agent's two heads.
   Several wide heads look elsewhere (enemy-paddle best head up to 0.36 even with the paddle masked).
-- Clean wide models: like the small clean agent, two of three have a head on the enemy paddle (best 0.56,
-  0.61) and lose without it (E12 mask column: -20.2, -6.8; the one that keeps winning, +15.7, has the
-  lowest enemy-paddle attention of the two but the strongest ball tracking, 0.93).
+- Clean wide models (E12 mask column in brackets): s2 has a head on the enemy paddle (best 0.61) and
+  collapses without it (-20.2), like the small clean agent. s1 also has one (0.56) but a head that tracks the
+  ball strongly (0.93), and it keeps winning (+15.7). s3 barely attends to either (0.15 ball, 0.19 paddle)
+  and is in between (-6.8).
 - The probes file has one line of NUL bytes (line 64, an earlier power cut); readers skip it and no row is
   missing from the analyses above.
 
