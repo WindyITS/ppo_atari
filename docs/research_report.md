@@ -185,6 +185,38 @@ The probe is fit on the model's own recorded games and applied to the replays (n
 - Passive correlation (attention on the ball before the fog against memory error inside it) shows no
   consistent relation (Spearman -0.12 to +0.50): only the intervention is informative.
 
+### E12c: the memory and attention analyses on the size-matched agent (2026-11-12, clean and fog + mask models)
+
+`scripts/run_wide_analyses.sh` reran E2, E3, E4, E10 and E13 on the 9 attn_lstm_wide models with the small
+agent's settings; `scripts/attention_heads.py` adds a per-head view. Mask and fog models follow when E12b ends.
+Wide fog + mask models: scratch s1 (wins), s2 / s3 (still learning, -11.1 / -4.2), curriculum s1-s3 (win).
+
+| fog + mask, own view | small attn_lstm (models that win) | wide attn_lstm_wide |
+|---|---|---|
+| E3 probe of the hidden ball's height from memory, R^2 | 0.93-0.98 (curriculum), 0.96 (scratch s2) | 0.92-0.98 (curriculum), 0.89 (scratch s1); 0.72 / 0.87 (s2 / s3) |
+| E4 return rate: control / wipe at fog entry | 0.95-1.00 / 0.06-0.20 | 0.92-0.99 / 0.04-0.25 (s2 / s3: 0.81 / 0.20, 0.80 / 0.19) |
+| E4 wipe before the fog (ball still visible) | 0.57-0.97 | 0.69-0.84 (s3: 0.23) |
+| E10 block attention to the ball: return rate | 0.06, 0.14, 0.54; one model unaffected (1.00) | 0.32, 0.37, 0.21; two unaffected (0.95, 0.89); s2 0.81 |
+| E10 sham block | no effect | no effect (all within 0.03 of control) |
+| E10 erase the ball | 0.04-0.14 | 0.04-0.15 |
+| E10 probe MAE under the block (px; control 0.7-5.4) | | 11.4-19.1 in five models (also in the unaffected curriculum s1, 11.4); 5.8 in two |
+| E13 best head on the ball, 8-4 steps before the fog | 0.65-0.88 | 0.69-0.97 (curriculum s3: 0.40; scratch s2: 0.12) |
+
+- **The memory findings replicate at the lstm's size.** The wide agent's memory holds the hidden ball as well
+  as the small agent's, and wiping it as the ball disappears costs as much.
+- **The attention gate replicates, less uniformly.** The block costs most of the returns in 3 of the 5 models
+  that track the ball (small: 3 of 4), the sham never matters, and in two of the unaffected models the block
+  still blurs the memory (probe error 11.4 px). The two models whose best head barely looks at the ball
+  (curriculum s3, scratch s2) are the two the block hurts least, which is the expected pattern.
+- **Mean attention over 8 heads understates tracking.** Averaged over heads, the wide models look at the ball
+  only 0.04-0.66 before the fog. Their best head looks 0.69-0.97, in line with the small agent's two heads.
+  Several wide heads look elsewhere (enemy-paddle best head up to 0.36 even with the paddle masked).
+- Clean wide models: like the small clean agent, two of three have a head on the enemy paddle (best 0.56,
+  0.61) and lose without it (E12 mask column: -20.2, -6.8; the one that keeps winning, +15.7, has the
+  lowest enemy-paddle attention of the two but the strongest ball tracking, 0.93).
+- The probes file has one line of NUL bytes (line 64, an earlier power cut); readers skip it and no row is
+  missing from the analyses above.
+
 ## Q2 Perception and Q3 the enemy-paddle shortcut
 
 **E5, decoy** (`scripts/view_interventions.py`): whole evaluation games in which the model sees the enemy
