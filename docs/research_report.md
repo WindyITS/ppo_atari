@@ -347,6 +347,9 @@ return after k M steps on fog + mask (per seed):
 
 ## Reproducing
 
+Every result file, the script that writes it and where it is used: `docs/data.md`. Locally,
+`bash scripts/sync_results.sh` copies the host's results; `uv run python scripts/make_figures.py` redraws the figures.
+
 Scripts (all in `scripts/`, outputs under `analysis/` on the host): `record_rollouts.py` (E2),
 `memory_interventions.py` (E4), `view_interventions.py` (E5), `decoy_tracking.py` (E5b), `enemy_shift.py`
 (E5c), `probe_memory.py` (E3), `random_control.py` (E3b), `attention_block.py` (E10), `scripted_baselines.py`

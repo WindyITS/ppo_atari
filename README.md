@@ -230,10 +230,12 @@ while its learning rate was still decaying, unlike a model trained with a 10M bu
 
 ### Evaluate saved models
 
+Where every result of the project lives (checkpoints, evaluations, analyses, archive): `docs/data.md`.
+
 ```bash
 # Evaluate every final model (scratch and fine-tuned) with the same 20 seeds and sampling policy:
 uv run pong-eval checkpoints/*/*/*/seed_*/final.pt --episodes 20 --seed 10000 \
-  --policy stochastic --device cpu --output evaluations/full_sweep.json
+  --policy stochastic --device cpu --output my_evaluation.json
 
 # Optional alternative protocol: always choose the most probable action.
 uv run pong-eval checkpoints/scratch/cnn/fog_mask/seed_1/final.pt --policy greedy

@@ -86,8 +86,8 @@ def name(agent: str) -> str:
 
 
 def save(fig, out: Path, stem: str):
-    for suffix in (".pdf", ".png"):
-        fig.savefig(out / f"{stem}{suffix}")
+    fig.savefig(out / f"{stem}.pdf", metadata={"CreationDate": None})  # no timestamp: unchanged figures stay byte-identical
+    fig.savefig(out / f"{stem}.png")
     plt.close(fig)
     print(f"wrote {out / stem}.pdf/.png")
 

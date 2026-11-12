@@ -1,5 +1,8 @@
 # Analysis plan
 
+> Historical: the first analysis plan (cnn vs lstm). Its steps are done; the current plan is
+> `docs/research_plan.md` and the data layout `docs/data.md`.
+
 Decided 2026-11-07. A vision-transformer counterpart of `cnn` and `lstm` was planned at the time, to get the
 same analysis; it has since been dropped and removed from the code.
 
