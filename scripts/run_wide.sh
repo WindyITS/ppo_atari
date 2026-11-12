@@ -5,14 +5,14 @@
 #   finetune  the clean run's step_10.0M.pt fine-tuned on fog_mask up to 15M (5M steps; fresh Adam, learning
 #             rate annealed over the fine-tune), mirroring checkpoints/finetune/attn_lstm/clean_10.0M_to_fog_mask
 # VIEWS (scratch views) and FT_VIEWS (fine-tune targets) widen the sweep; E12b trains the remaining views:
-#   VIEWS="clean mask fog fog_mask" FT_VIEWS="mask fog fog_mask" nohup bash scripts/run_wide.sh >> logs/wide.log 2>&1 &
+#   VIEWS="clean mask fog fog_mask" FT_VIEWS="mask fog fog_mask" nohup bash scripts/run_wide.sh >> logs/sweeps/wide.log 2>&1 &
 # Finished runs are skipped, so listing the E12 views again changes nothing for them.
 # At most MAX_PARALLEL runs at a time (the host loses power under heavy load); scratch runs go first, and a
 # fine-tune starts once its parent's step_10.0M.pt exists and a slot is free.
 # Rerunning the script skips finished runs and resumes interrupted ones from their newest milestone that
 # loads; training refuses to start in a folder that already holds final.pt, so no checkpoint is touched.
 # Usage (on the training host, from the repository root, when no attn_lstm_wide run is active):
-#   nohup bash scripts/run_wide.sh >> logs/wide.log 2>&1 &
+#   nohup bash scripts/run_wide.sh >> logs/sweeps/wide.log 2>&1 &
 set -euo pipefail
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 export PATH="$HOME/.local/bin:$PATH"

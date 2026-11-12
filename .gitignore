@@ -16,8 +16,9 @@ videos/
 wandb/
 evaluations/
 
-# Analysis outputs (rollout recordings, probes, interventions)
+# Analysis outputs (rollout recordings, probes, interventions) and set-aside data (docs/data.md)
 /analysis/
+/archive/
 
 # Personal notes on paper
 personal_notes/

@@ -22,8 +22,8 @@ the ball is in the agent's half and hidden. The probe (ridge on [h, c] -> ball h
 game-grouped cross-validation) is fit on the checkpoint's own recording (scripts/record_rollouts.py, same
 steps: hidden ball inside the agent's half). In the control branch the script also records how much attention
 went to the ball's own cell while it was visible, for the correlational version of the question.
-Output: JSON lines (default analysis/attention_block_v2.jsonl; analysis/attention_block.jsonl holds the first
-run, attn_lstm only, without erase_ball), one row per checkpoint; reruns skip done rows.
+Output: JSON lines (default analysis/attention_block.jsonl; the first run, attn_lstm only and without erase_ball,
+is archive/analysis/attention_block.v1.jsonl on the host), one row per checkpoint; reruns skip done rows.
 """
 
 import argparse
@@ -280,7 +280,7 @@ def main():
     parser.add_argument("--seed", type=int, default=20_000)
     parser.add_argument("--max-events", type=int, default=20, help="per game")
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--output", type=Path, default=Path("analysis/attention_block_v2.jsonl"))
+    parser.add_argument("--output", type=Path, default=Path("analysis/attention_block.jsonl"))
     args = parser.parse_args()
     paths = [p.resolve().relative_to(Path.cwd()) if p.is_absolute() else p
              for p in (args.checkpoints or default_checkpoints(args.root))]

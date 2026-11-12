@@ -1,9 +1,11 @@
 """Figures for the paper, from the analysis outputs (docs/research_report.md).
 
-    uv run python scripts/make_figures.py --data analysis --out figures
+    bash scripts/sync_results.sh                     # local copy of the host's analysis/ and evaluations/
+    uv run python scripts/make_figures.py
 
---data holds the host's analysis/ folder (enemy_shift.jsonl, attention_block_v2.jsonl, probes_random.jsonl,
-interventions/, scripted_baselines_v2_*.jsonl) and host_evaluations/sweep_stochastic.jsonl. Each figure is
+--data is the analysis/ folder (enemy_shift.jsonl, attention_block.jsonl, probes_random.jsonl, interventions/,
+attention_maps.json, attention_strip.npz) and --evaluations the evaluations/ folder (sweep_stochastic.jsonl);
+docs/data.md describes both. Each figure is
 written as PDF (for the paper) and PNG (for a quick look); --only picks some of them. Models are the final
 checkpoints. "Curriculum" is attn_lstm trained on clean Pong for 10M steps, then fine-tuned on the view.
 
@@ -149,7 +151,7 @@ def fig_views(data: Path, out: Path):
 
 
 def fig_returns(data: Path, out: Path):
-    rows = read_jsonl(data / "host_evaluations" / "sweep_stochastic.jsonl")
+    rows = read_jsonl(EVALUATIONS / "sweep_stochastic.jsonl")
     returns = defaultdict(list)
     for row in rows:
         key = model_key(row)
@@ -283,7 +285,7 @@ def fig_block(data: Path, out: Path):
     branches = ("control", "block_sham", "block_ball", "erase_ball")
     labels = ("no block", "block elsewhere", "block the ball", "erase the ball")
     models = []
-    for row in read_jsonl(data / "attention_block_v2.jsonl"):
+    for row in read_jsonl(data / "attention_block.jsonl"):
         key = model_key(row)
         if key is None or key[1] != "fog_mask" or row["arch"] != "attn_lstm":
             continue
@@ -567,6 +569,8 @@ def fig_environments(data: Path, out: Path):
     save(fig, out, "environments")
 
 
+EVALUATIONS = Path("evaluations")  # set from --evaluations in main()
+
 FIGURES = {"views": fig_views, "returns": fig_returns, "shift": fig_shift, "wipes": fig_wipes,
            "probes": fig_probes, "block": fig_block, "attention": fig_attention,
            "environments": fig_environments}
@@ -575,9 +579,12 @@ FIGURES = {"views": fig_views, "returns": fig_returns, "shift": fig_shift, "wipe
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data", type=Path, default=Path("analysis"))
+    parser.add_argument("--evaluations", type=Path, default=Path("evaluations"))
     parser.add_argument("--out", type=Path, default=Path("figures"))
     parser.add_argument("--only", nargs="+", choices=list(FIGURES), default=list(FIGURES))
     args = parser.parse_args()
+    global EVALUATIONS
+    EVALUATIONS = args.evaluations
     args.out.mkdir(parents=True, exist_ok=True)
     for figure in args.only:
         FIGURES[figure](args.data, args.out)

@@ -10,7 +10,7 @@
 # VIEWS chooses the training views whose finished models (scratch and clean_10.0M_to_<view> fine-tunes) are
 # analysed. CPU only, WORKERS processes per step, so it can run beside training.
 # Usage (on the training host, from the repository root):
-#   VIEWS="clean fog_mask" nohup bash scripts/run_wide_analyses.sh >> logs/wide_analyses.log 2>&1 &
+#   VIEWS="clean fog_mask" nohup bash scripts/run_wide_analyses.sh >> logs/analysis/wide_analyses.log 2>&1 &
 set -euo pipefail
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=""
 export PATH="$HOME/.local/bin:$PATH"
