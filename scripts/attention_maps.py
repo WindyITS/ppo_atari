@@ -1,9 +1,10 @@
 """Where the attention-LSTM looks while a ball comes towards it (data for the paper's attention figure).
 
     uv run python scripts/attention_maps.py summary --rollouts analysis/rollouts --out analysis/attention_maps.json
+    uv run python scripts/attention_maps.py summary --arch attn_lstm_wide --out analysis/attention_maps_attn_lstm_wide.json
     uv run python scripts/attention_maps.py strip --checkpoint <final.pt> --out analysis/attention_strip.npz
 
-summary  For every attn_lstm recording on its own view (scripts/record_rollouts.py: the 30 frozen-evaluation
+summary  For every --arch (default attn_lstm) recording on its own view (scripts/record_rollouts.py: the 30 frozen-evaluation
          games), each flight towards the agent is aligned on the step the ball enters the agent's half (x >= 42,
          where the fog starts), from STEPS_BEFORE steps before to STEPS_AFTER after. At each step it measures the
          attention weight (mean over heads) on three targets, located on the unoccluded frame:
@@ -103,9 +104,9 @@ def summarize_recording(path: Path) -> dict:
             "uniform": {t: round(float(np.mean(covered[t])), 4) if covered[t] else None for t in TARGETS}}
 
 
-def summary(rollouts: Path, out: Path):
+def summary(rollouts: Path, out: Path, arch: str = "attn_lstm"):
     rows = []
-    for path in sorted(rollouts.glob("*__attn_lstm__*__final.npz")):
+    for path in sorted(rollouts.glob(f"*__{arch}__*__final.npz")):
         if path.name.endswith(".random.npz"):
             continue
         _, meta = load(path)
@@ -161,6 +162,7 @@ def main():
     s = sub.add_parser("summary")
     s.add_argument("--rollouts", type=Path, default=Path("analysis/rollouts"))
     s.add_argument("--out", type=Path, default=Path("analysis/attention_maps.json"))
+    s.add_argument("--arch", default="attn_lstm", help="attn_lstm or attn_lstm_wide")
     t = sub.add_parser("strip")
     t.add_argument("--checkpoint", type=Path, required=True)
     t.add_argument("--out", type=Path, default=Path("analysis/attention_strip.npz"))
@@ -168,7 +170,7 @@ def main():
     t.add_argument("--after", type=int, default=200, help="skip the game's first steps (serve, warm-up)")
     args = parser.parse_args()
     if args.command == "summary":
-        summary(args.rollouts, args.out)
+        summary(args.rollouts, args.out, args.arch)
     else:
         strip(args.checkpoint, args.out, args.seed, args.after)
 
