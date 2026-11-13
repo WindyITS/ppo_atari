@@ -16,6 +16,9 @@ three branches with the same action seed:
                   paddle the CNN's 4-frame stack then no longer shows the ball when it may move again. (The
                   paddle crosses the court in about 6 steps, so a CNN held only while the ball is visible can
                   still read the ball's path from its last frames and get there in time.)
+    blind         no hold, but the ball is erased from every frame the agent sees, from the save until the
+                  point ends or the ball is returned past x = 40: what the agent achieves with no information
+                  about this flight at all (habit, or the rally's regularity)
 Per branch: whether the ball is returned (as in scripts/memory_interventions.py) and the distance between the
 agent's paddle and the ball when the ball reaches the paddle line. Prediction: an agent that carries the ball
 through the fog only in its paddle position (early commitment) loses the ball after hold_visible on fog + hidden
@@ -37,6 +40,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from pong_rl.analysis import scene  # noqa: E402
 from pong_rl.analysis.batch import run_all  # noqa: E402
 from pong_rl.analysis.player import Player  # noqa: E402
 from pong_rl.analysis.rollouts import WINDOW_START  # noqa: E402
@@ -44,13 +48,24 @@ from pong_rl.analysis.rollouts import WINDOW_START  # noqa: E402
 PADDLE_X, RETURN_X, MAX_STEPS = 70.0, 40.0, 150
 NOOP = 0
 STACK = 4
-BRANCHES = ("control", "hold_visible", "hold_stack")
+BRANCHES = ("control", "hold_visible", "hold_stack", "blind")
+
+
+def erase_ball(obs: np.ndarray) -> np.ndarray:
+    """The observation with the ball painted out of every frame (box padded by 1 pixel)."""
+    out = obs.copy()
+    for frame in out.reshape(-1, *out.shape[-2:]):
+        box = scene.ball_box(frame, pad=1)
+        if box is not None:
+            frame[box] = scene.PONG_BG_VALUE
+    return out
 
 
 def play_branch(player: Player, branch: str) -> dict:
     """From the save: hold the paddle (hold_visible) until the ball reaches the fog's edge; play the point out."""
     previous_x, reached, gap, held = None, False, None, 0
-    holding, entered = branch != "control", None
+    holding, entered = branch in ("hold_visible", "hold_stack"), None
+    transform = erase_ball if branch == "blind" else None
     extra = STACK if branch == "hold_stack" else 0
     for k in range(MAX_STEPS):
         if player.done:
@@ -67,7 +82,7 @@ def play_branch(player: Player, branch: str) -> dict:
                 gap = float(abs(where["agent_y"] - where["ball_y"]))
         if reached and x == x and previous_x is not None and x < previous_x and x < RETURN_X:
             return {"outcome": "returned", "gap": gap, "held_steps": held}
-        step = player.step(action=NOOP if holding else None)
+        step = player.step(action=NOOP if holding else None, transform=transform)
         held += int(holding)
         if step.reward != 0:
             return {"outcome": "returned" if step.reward > 0 else "missed", "gap": gap, "held_steps": held}
@@ -146,7 +161,8 @@ def default_checkpoints(root: Path) -> list[Path]:
 def describe(row: dict) -> str:
     b = row["branches"]
     return (f"{row['events']} events; returned control {b['control']['return_rate']:.2f}, hold_visible "
-            f"{b['hold_visible']['return_rate']:.2f}, hold_stack {b['hold_stack']['return_rate']:.2f} "
+            f"{b['hold_visible']['return_rate']:.2f}, hold_stack {b['hold_stack']['return_rate']:.2f}, blind "
+            f"{b['blind']['return_rate']:.2f} "
             f"(held {b['hold_stack']['held_steps']:.1f} steps)")
 
 
