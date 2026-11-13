@@ -417,6 +417,11 @@ attention agent, with three seeds (more seeds, E15, were started and stopped at 
   0.85-0.97 / 0.80-0.94 / 0.77-0.92 / 0.80-0.94; clean CNN blind 0.12; fog CNN blind 0.92-0.98 (it plays
   from the opponent's paddle alone); wide attention fog + hidden paddle blind 0.06-0.14. "Early
   commitment" (E8) was the visible side of a policy that goes where the ball usually comes back.
+- **The CNN needs the rally, not the ball (E17b, E17c).** With the ball erased for whole games, its own
+  returns included, the fog + hidden paddle CNN loses every game (-14.9 to -19.0), while the fog CNN still
+  wins (+5.0 to +18.1, from the opponent's paddle alone). In the games of every model that wins fog + hidden
+  paddle, 74-95% of the balls arrive within 4 px of their usual height (losing models' games: 11-56%); the
+  CNN's paddle waits there (spread 3-5 px). The CNN predicts the ball's return from the rally it has seen.
 - **Learning (E14).** Training return turns positive on fog + hidden paddle after 2.5-3.5M steps for every
   LSTM seed, 3.5M for the one wide attention seed that learns (the other two stall for 4M and 10M steps and
   end at -11 and -3), 2-3.5M of the 5M for the curriculum, 9-11M for the CNN.

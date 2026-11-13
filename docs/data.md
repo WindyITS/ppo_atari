@@ -56,6 +56,8 @@ the host for the attention strip of Figure `attention`.
 | E15 | more seeds (4-6) for fog + hidden paddle | `run_sweep.sh` | stopped at the user's request; partial runs in `archive/seeds_4-6_stopped/` | none |
 | E16 | attention block controls: same attention removed elsewhere, erase + block | `attention_block.py --controls` | `analysis/attention_block_controls.jsonl` | Fig. `block`; paper 3.4; report (review) |
 | E17 | hold the paddle while the ball is visible; erase the ball for the whole flight | `commit_hold.py` | `analysis/commit_hold.jsonl` | paper 3.2, 3.5; report (review) |
+| E17b | how regular the rallies are (arrival heights of ball and paddle) | `rally_regularity.py` (host: reads the recordings) | `analysis/rally_regularity.json` | paper 3.5 |
+| E17c | whole games with the ball erased, own returns included | `view_interventions.py --transforms erase_ball` | rows with `transform` = `erase_ball` in `analysis/view_interventions.jsonl` | paper 3.2, 3.5 |
 | all | every table of the report | `report_tables.py` | `analysis/report.json` (derived; regenerate after new results) | report |
 
 The paper (since 2026-11-13) shows only the CNN, the LSTM and the wide attention agent (`attn_lstm_wide`); the
