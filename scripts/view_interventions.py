@@ -7,6 +7,8 @@ sees (the game itself is untouched):
     none          the plain view
     mirror_enemy  the enemy paddle shown at its mirrored height (top <-> bottom), a wrong but realistic cue
     erase_enemy   the enemy paddle removed (as the mask view does)
+    erase_ball    the ball removed from every frame for the whole game, the agent's own returns included
+                  (added 2026-11-14, review): what a policy wins with no sight of the ball at all
 If a policy reads the ball's height from the enemy paddle, mirror_enemy should hurt it more than erase_enemy.
 Output: JSON lines (default analysis/view_interventions.jsonl), one row per checkpoint and transform; reruns
 skip rows already written.
@@ -30,10 +32,21 @@ import torch  # noqa: E402
 from pong_rl.analysis import scene  # noqa: E402
 from pong_rl.analysis.player import Player  # noqa: E402
 
+def erase_ball(obs: np.ndarray) -> np.ndarray:
+    """The observation with the ball painted out of every frame (box padded by 1 pixel)."""
+    out = obs.copy()
+    for frame in out.reshape(-1, *out.shape[-2:]):
+        box = scene.ball_box(frame, pad=1)
+        if box is not None:
+            frame[box] = scene.PONG_BG_VALUE
+    return out
+
+
 TRANSFORMS = {
     "none": None,
     "mirror_enemy": scene.mirror_enemy,
     "erase_enemy": lambda obs: scene.erase(obs, slice(scene.COURT_Y_MIN, scene.COURT_Y_MAX), scene.ENEMY_REGION),
+    "erase_ball": erase_ball,
 }
 
 
@@ -69,7 +82,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=Path, default=Path("checkpoints"))
     parser.add_argument("--checkpoints", nargs="+", type=Path, default=None)
-    parser.add_argument("--transforms", nargs="+", choices=list(TRANSFORMS), default=list(TRANSFORMS))
+    parser.add_argument("--transforms", nargs="+", choices=list(TRANSFORMS), default=["none", "mirror_enemy", "erase_enemy"])
     parser.add_argument("--episodes", type=int, default=30)
     parser.add_argument("--seed", type=int, default=10_000)
     parser.add_argument("--workers", type=int, default=4)
