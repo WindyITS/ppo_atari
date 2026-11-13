@@ -27,7 +27,12 @@ def episodes(folder: Path) -> list[tuple[int, float]]:
     """(global_step, return) of every episode of a run, each step counted once (see the module docstring)."""
     launches = []
     for path in sorted(folder.glob("episodes_*.jsonl"), key=lambda p: int(p.stem.split("_")[1])):
-        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        rows = []
+        for line in path.read_text(errors="replace").splitlines():
+            try:  # a power cut can leave a torn or NUL-filled line; it is skipped
+                rows.append(json.loads(line.strip("\x00")))
+            except json.JSONDecodeError:
+                continue
         if rows:
             launches.append([(int(r["global_step"]), float(r["episode_return"])) for r in rows])
     kept = []
