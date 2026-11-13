@@ -14,10 +14,13 @@ summary  For every --arch (default attn_lstm) recording on its own view (scripts
            enemy_paddle the enemy paddle column (0), likewise
          and, as a reference, the share of the 49 cells each target covers (what uniform attention would give).
          Only flights the agent returns are kept, so every step is a moment of a successful play.
-         Output: one JSON object, per recording the mean (and flight count) per target and relative step.
+         Output: one JSON object, per recording the mean (and flight count) per target and relative step,
+         and per head ("heads"): the same curves for each head separately, on the even- and on the
+         odd-numbered flights ("even", "odd"), so that a head can be chosen on one half of the flights
+         and shown on the other (choosing the best of eight heads on the same flights would flatter it).
 strip    Plays one frozen-evaluation game (env seed --seed, exactly as pong_rl.evaluate) with the checkpoint and
          saves the first returned flight after --after steps: per step the frame the model saw, the
-         unoccluded frame, both heads' attention (2, 49) and the ball's position.
+         unoccluded frame, every head's attention (heads, 49) and the ball's position.
 Cells: the 84x84 frame is read as a 7x7 grid of 12-pixel cells (row = y // 12, column = x // 12), the convention
 of scripts/attention_block.py; each conv cell actually sees an overlapping 36x36 patch.
 """
@@ -78,13 +81,18 @@ def returned_flights(arrays: dict) -> list[int]:
 
 def summarize_recording(path: Path) -> dict:
     arrays, meta = load(path)
-    attention = arrays["attention"].astype(np.float32).mean(axis=1)  # (steps, 49), mean over heads
+    per_head = arrays["attention"].astype(np.float32)  # (steps, heads, 49)
+    attention = per_head.mean(axis=1)  # (steps, 49), mean over heads
+    heads = per_head.shape[1]
     steps = range(-STEPS_BEFORE, STEPS_AFTER + 1)
     sums = {t: np.zeros(len(steps)) for t in TARGETS}
     counts = {t: np.zeros(len(steps), int) for t in TARGETS}
+    head_sums = {half: {t: np.zeros((heads, len(steps))) for t in TARGETS} for half in ("even", "odd")}
+    head_counts = {half: {t: np.zeros(len(steps), int) for t in TARGETS} for half in ("even", "odd")}
     covered = {t: [] for t in TARGETS}
     entries = returned_flights(arrays)
-    for entry in entries:
+    for n, entry in enumerate(entries):
+        half = "even" if n % 2 == 0 else "odd"
         for k, offset in enumerate(steps):
             i = entry + offset
             if not (0 <= i < len(attention)) or arrays["game"][i] != arrays["game"][entry]:
@@ -96,11 +104,15 @@ def summarize_recording(path: Path) -> dict:
                     continue
                 sums[target][k] += attention[i][mask].sum()
                 counts[target][k] += 1
+                head_sums[half][target][:, k] += per_head[i][:, mask].sum(axis=1)
+                head_counts[half][target][k] += 1
                 covered[target].append(mask.sum() / mask.size)
     return {"recording": Path(path).name, "run": meta["run"], "kind": meta["kind"], "view": meta["view"],
             "train_view": meta["train_view"], "flights": len(entries), "steps": list(steps),
             "mean": {t: (sums[t] / np.maximum(counts[t], 1)).round(4).tolist() for t in TARGETS},
             "count": {t: counts[t].tolist() for t in TARGETS},
+            "heads": {half: {t: (head_sums[half][t] / np.maximum(head_counts[half][t], 1)).round(4).tolist()
+                             for t in TARGETS} for half in ("even", "odd")},
             "uniform": {t: round(float(np.mean(covered[t])), 4) if covered[t] else None for t in TARGETS}}
 
 
