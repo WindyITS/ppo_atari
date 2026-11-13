@@ -6,12 +6,16 @@ E8 found that the memoryless CNN wins fog + hidden paddle by moving its paddle e
 visible, and barely moving inside the fog; memory agents can also move late. That is a correlation. Here the
 early movement is taken away. Each checkpoint plays games on its own view (Player: the frozen evaluation's env
 and action seeds). Every time the ball starts towards the agent, the game is saved and the flight is replayed in
-two branches with the same action seed:
+three branches with the same action seed:
     control       no intervention
     hold_visible  the agent's action is replaced by NOOP from the save until the ball reaches the fog's edge
                   (x >= 42; the same point on unfogged views), so its paddle stays where it was while the ball
                   is visible on its way; from then on the agent plays freely (the sampling generator still draws
                   at every step, so the free part starts from the same random stream)
+    hold_stack    the same, held for STACK more steps after the ball reaches the fog's edge: on fog + hidden
+                  paddle the CNN's 4-frame stack then no longer shows the ball when it may move again. (The
+                  paddle crosses the court in about 6 steps, so a CNN held only while the ball is visible can
+                  still read the ball's path from its last frames and get there in time.)
 Per branch: whether the ball is returned (as in scripts/memory_interventions.py) and the distance between the
 agent's paddle and the ball when the ball reaches the paddle line. Prediction: an agent that carries the ball
 through the fog only in its paddle position (early commitment) loses the ball after hold_visible on fog + hidden
@@ -39,19 +43,23 @@ from pong_rl.analysis.rollouts import WINDOW_START  # noqa: E402
 
 PADDLE_X, RETURN_X, MAX_STEPS = 70.0, 40.0, 150
 NOOP = 0
-BRANCHES = ("control", "hold_visible")
+STACK = 4
+BRANCHES = ("control", "hold_visible", "hold_stack")
 
 
 def play_branch(player: Player, branch: str) -> dict:
     """From the save: hold the paddle (hold_visible) until the ball reaches the fog's edge; play the point out."""
     previous_x, reached, gap, held = None, False, None, 0
-    holding = branch == "hold_visible"
+    holding, entered = branch != "control", None
+    extra = STACK if branch == "hold_stack" else 0
     for k in range(MAX_STEPS):
         if player.done:
             return {"outcome": "undecided", "gap": gap, "held_steps": held}
         where = player.scene_now()
         x = where["ball_x"]
-        if holding and x == x and x >= WINDOW_START:
+        if entered is None and x == x and x >= WINDOW_START:
+            entered = k
+        if holding and entered is not None and k >= entered + extra:
             holding = False
         if not reached and x == x and x >= PADDLE_X:
             reached = True
@@ -108,14 +116,16 @@ def summarize(path, player, events, episodes, seed, max_events) -> dict:
                             "median_gap": float(np.median(gaps)) if gaps else None,
                             "held_steps": float(np.mean([e["outcomes"][name]["held_steps"] for e in events]))
                             if events else None}
-    paired = [(e["outcomes"]["hold_visible"]["outcome"] == "returned") - (e["outcomes"]["control"]["outcome"] == "returned")
-              for e in events if "undecided" not in (e["outcomes"]["hold_visible"]["outcome"],
-                                                     e["outcomes"]["control"]["outcome"])]
-    change = None
-    if len(paired) >= 5:
-        d = np.asarray(paired, float)
-        boots = d[np.random.default_rng(0).integers(0, len(d), size=(2000, len(d)))].mean(1)
-        change = [float(d.mean()), float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))]
+    change = {}
+    for name in BRANCHES[1:]:
+        paired = [(e["outcomes"][name]["outcome"] == "returned") - (e["outcomes"]["control"]["outcome"] == "returned")
+                  for e in events if "undecided" not in (e["outcomes"][name]["outcome"],
+                                                         e["outcomes"]["control"]["outcome"])]
+        change[name] = None
+        if len(paired) >= 5:
+            d = np.asarray(paired, float)
+            boots = d[np.random.default_rng(0).integers(0, len(d), size=(2000, len(d)))].mean(1)
+            change[name] = [float(d.mean()), float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))]
     return {"checkpoint": str(path), "arch": player.arch, "train_view": player.train_view, "view": player.view,
             "kind": player.checkpoint.get("kind", "scratch"), "run": player.checkpoint.get("run"),
             "episodes": episodes, "seed": seed, "max_events_per_game": max_events, "events": len(events),
@@ -135,9 +145,9 @@ def default_checkpoints(root: Path) -> list[Path]:
 
 def describe(row: dict) -> str:
     b = row["branches"]
-    return (f"{row['events']} events; returned control {b['control']['return_rate']:.2f} -> hold "
-            f"{b['hold_visible']['return_rate']:.2f} (held {b['hold_visible']['held_steps']:.1f} steps); "
-            f"gap {b['control']['median_gap']} -> {b['hold_visible']['median_gap']}")
+    return (f"{row['events']} events; returned control {b['control']['return_rate']:.2f}, hold_visible "
+            f"{b['hold_visible']['return_rate']:.2f}, hold_stack {b['hold_stack']['return_rate']:.2f} "
+            f"(held {b['hold_stack']['held_steps']:.1f} steps)")
 
 
 def main():
