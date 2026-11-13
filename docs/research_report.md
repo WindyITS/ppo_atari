@@ -211,14 +211,14 @@ Wide fog + mask models: scratch s1 (wins), s2 / s3 (still learning, -11.1 / -4.2
 | E10 block attention to the ball: return rate | 0.06, 0.14, 0.54; one model unaffected (1.00) | 0.32, 0.37, 0.21; two unaffected (0.95, 0.89); s2 0.81 |
 | E10 sham block | no effect | no effect (all within 0.03 of control) |
 | E10 erase the ball | 0.04-0.14 | 0.04-0.15 |
-| E10 probe MAE under the block (px; control 0.7-5.4) | | 11.4-19.1 in five models (also in the unaffected curriculum s1, 11.4); 5.8 in two |
+| E10 probe MAE under the block (px; control 0.7-5.4) | | 11.4-19.1 in four models (also in the unaffected curriculum s1, 11.4); 5.8 in the other two |
 | E13 best head on the ball, 8-4 steps before the fog | 0.65-0.88 | 0.69-0.97 (curriculum s3: 0.40; scratch s2: 0.12) |
 
 - **The memory findings replicate at the lstm's size.** The wide agent's memory holds the hidden ball as well
   as the small agent's, and wiping it as the ball disappears costs as much.
 - **The attention gate replicates, less uniformly.** The block costs most of the returns in 3 of the 5 models
-  that track the ball (small: 3 of 4), the sham never matters, and in two of the unaffected models the block
-  still blurs the memory (probe error 11.4 px). The two models whose best head barely looks at the ball
+  that track the ball (small: 3 of 4), the sham never matters, and in one of the unaffected models (curriculum
+  s1) the block still blurs the memory (probe error 11.4 px). The two models whose best head barely looks at the ball
   (curriculum s3, scratch s2) are the two the block hurts least, which is the expected pattern.
 - **Mean attention over 8 heads understates tracking.** Averaged over heads, the wide models look at the ball
   only 0.04-0.66 before the fog. Their best head looks 0.69-0.97, in line with the small agent's two heads.

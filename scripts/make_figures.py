@@ -8,14 +8,17 @@ attention_maps.json, attention_strip.npz) and --evaluations the evaluations/ fol
 docs/data.md describes both. Each figure is
 written as PDF (for the paper) and PNG (for a quick look); --only picks some of them. Models are the final
 checkpoints. "Curriculum" is attn_lstm trained on clean Pong for 10M steps, then fine-tuned on the view.
+attn_lstm_wide (E12, the attention agent at the LSTM's size) is drawn in a darker shade of the attention
+agent's colour with square markers, from scratch and with the curriculum ("wide_curriculum").
 
     views    the four views of one moment of a game, with the hidden regions and the hidden ball marked
     returns  return of every model on the view it was trained on (dots: seeds)
     shift    balls returned when the enemy paddle the model sees is moved (E5c)
     wipes    balls returned when the memory is wiped before, at and inside the fog (E4)
     probes   R^2 of a linear probe for the hidden ball's height: trained vs untrained network (E3, E3b)
-    block    the attention agent on fog + hidden paddle: attention blocked on the ball before the fog (E10)
-    attention  where the attention agent looks during a flight (E13; attention_maps.json, attention_strip.npz)
+    block    the attention agents on fog + hidden paddle: attention blocked on the ball before the fog (E10)
+    attention  where the (small) attention agent looks during a flight (E13; attention_maps.json,
+               attention_strip.npz)
     environments  the four views in colour: one flight as a time-lapse trail on the game screen, and the 84x84
                   frame the agent receives (needs no data: a scripted player plays the game)
 """
@@ -32,11 +35,15 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.patches import Circle, Rectangle  # noqa: E402
 
-# Categorical slots 1-3 of the reference palette (validated all-pairs, colour-blind safe); one per agent.
-COLOURS = {"cnn": "#2a78d6", "lstm": "#eb6834", "attn_lstm": "#1baf7a"}
+# Categorical slots 1-3 of the reference palette, one per architecture; the wide attention agent takes a dark
+# step of the attention agent's aqua and square markers (the four validated all-pairs, colour-blind safe, with
+# scripts/validate_palette.js of the dataviz guide).
+COLOURS = {"cnn": "#2a78d6", "lstm": "#eb6834", "attn_lstm": "#1baf7a", "attn_lstm_wide": "#0b6e4c"}
 NEUTRAL = "#8a8985"
 INK, INK_2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
-NAMES = {"cnn": "CNN (4 frames)", "lstm": "CNN + LSTM", "attn_lstm": "CNN + attention + LSTM"}
+NAMES = {"cnn": "CNN (4 frames)", "lstm": "CNN + LSTM", "attn_lstm": "CNN + attention + LSTM",
+         "attn_lstm_wide": "CNN + attention + LSTM, wide"}
+WIDE = ("attn_lstm_wide", "wide_curriculum")
 VIEW_NAMES = {"clean": "clean", "mask": "hidden paddle", "fog": "fog", "fog_mask": "fog + hidden paddle"}
 VIEWS = ("clean", "mask", "fog", "fog_mask")
 
@@ -64,7 +71,8 @@ def model_key(row: dict) -> tuple[str, str] | None:
     """(agent, view) of a final checkpoint in the paper, or None for runs the paper leaves out.
 
     cnn and lstm count from scratch only; attn_lstm counts as "attn_lstm" from scratch and as "curriculum"
-    when fine-tuned from its clean 10M checkpoint. Tagged control runs (folder names with "__") are left out.
+    when fine-tuned from its clean 10M checkpoint, attn_lstm_wide likewise as "attn_lstm_wide" and
+    "wide_curriculum". Tagged control runs (folder names with "__") are left out.
     """
     run = row["run"]
     kind, arch, label = run.split("/")[:3]
@@ -72,17 +80,27 @@ def model_key(row: dict) -> tuple[str, str] | None:
         return None
     if kind == "scratch":
         return arch, label
-    if arch == "attn_lstm" and label.startswith("clean_10.0M_to_"):
-        return "curriculum", label.removeprefix("clean_10.0M_to_")
+    if arch in ("attn_lstm", "attn_lstm_wide") and label.startswith("clean_10.0M_to_"):
+        agent = "curriculum" if arch == "attn_lstm" else "wide_curriculum"
+        return agent, label.removeprefix("clean_10.0M_to_")
     return None
 
 
 def colour(agent: str) -> str:
-    return COLOURS["attn_lstm" if agent == "curriculum" else agent]
+    return COLOURS[{"curriculum": "attn_lstm", "wide_curriculum": "attn_lstm_wide"}.get(agent, agent)]
 
 
 def name(agent: str) -> str:
-    return "attention + LSTM, curriculum" if agent == "curriculum" else NAMES[agent]
+    return {"curriculum": "attention + LSTM, curriculum",
+            "wide_curriculum": "attention + LSTM, wide, curriculum"}.get(agent, NAMES.get(agent))
+
+
+def marker(agent: str) -> str:
+    return "s" if agent in WIDE else "o"
+
+
+def hollow(agent: str) -> bool:
+    return agent in ("curriculum", "wide_curriculum")
 
 
 def save(fig, out: Path, stem: str):
@@ -92,14 +110,14 @@ def save(fig, out: Path, stem: str):
     print(f"wrote {out / stem}.pdf/.png")
 
 
-def dots(ax, x: float, values, c: str, width: float = 0.5, hollow: bool = False):
+def dots(ax, x: float, values, c: str, width: float = 0.5, hollow: bool = False, marker: str = "o"):
     """A thin bar at the mean with one dot per seed."""
     values = np.asarray(values, float)
     ax.bar(x, values.mean(), width, color=c, alpha=0.28, edgecolor="none")
     ax.hlines(values.mean(), x - width / 2, x + width / 2, color=c, linewidth=2)
     jitter = np.linspace(-width / 5, width / 5, len(values)) if len(values) > 1 else [0.0]
-    ax.scatter(x + np.asarray(jitter), values, s=18, zorder=3, linewidths=1.2,
-               facecolor="white" if hollow else c, edgecolor=c)
+    ax.scatter(x + np.asarray(jitter), values, s=18 if marker == "o" else 15, zorder=3, linewidths=1.2,
+               facecolor="white" if hollow else c, edgecolor=c, marker=marker)
 
 
 # --- figures -----------------------------------------------------------------------------------------------
@@ -158,22 +176,23 @@ def fig_returns(data: Path, out: Path):
         if key is None or row["checkpoint_file"] != "final.pt" or row["eval_view"] != key[1]:
             continue
         returns[key].append(row["summary"]["mean_return"])
-    agents = ("cnn", "lstm", "attn_lstm", "curriculum")
-    fig, ax = plt.subplots(figsize=(7.2, 2.6))
+    agents = ("cnn", "lstm", "attn_lstm", "curriculum", "attn_lstm_wide", "wide_curriculum")
+    fig, ax = plt.subplots(figsize=(7.2, 2.8))
     for j, view in enumerate(VIEWS):
         for i, agent in enumerate(agents):
             values = returns.get((agent, view))
             if values:
-                dots(ax, j + (i - 1.5) * 0.2, values, colour(agent), width=0.17, hollow=agent == "curriculum")
+                dots(ax, j + (i - 2.5) * 0.145, values, colour(agent), width=0.125, hollow=hollow(agent),
+                     marker=marker(agent))
     ax.axhline(0, color=INK_2, linewidth=0.8)
     ax.set_xticks(range(len(VIEWS)), [VIEW_NAMES[v] for v in VIEWS])
     ax.set_xlabel("view the model was trained and tested on")
     ax.set_ylim(-21.5, 21.5)
     ax.set_yticks([-21, -10, 0, 10, 21])
     ax.set_ylabel("mean return (30 games)")
-    handles = [plt.Line2D([], [], marker="o", linestyle="", color=colour(a), markersize=5,
-                          markerfacecolor="white" if a == "curriculum" else colour(a)) for a in agents]
-    ax.legend(handles, [name(a) for a in agents], ncol=4, loc="lower center", bbox_to_anchor=(0.5, 1.0),
+    handles = [plt.Line2D([], [], marker=marker(a), linestyle="", color=colour(a), markersize=5,
+                          markerfacecolor="white" if hollow(a) else colour(a)) for a in agents]
+    ax.legend(handles, [name(a) for a in agents], ncol=3, loc="lower center", bbox_to_anchor=(0.5, 1.0),
               fontsize=7.5, handletextpad=0.3, columnspacing=1.2)
     save(fig, out, "returns")
 
@@ -184,28 +203,27 @@ def fig_shift(data: Path, out: Path):
     shifts = (-8, -4, 0, 4, 8)
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.5), sharey=True)
     for ax, view in zip(axes, ("clean", "fog")):
-        for agent in ("cnn", "lstm", "attn_lstm"):
-            # On fog the attention agent counts from scratch and with the curriculum alike: same question.
-            group = [r for r in rows if model_key(r)[1] == view
-                     and model_key(r)[0] in ((agent, "curriculum") if agent == "attn_lstm" else (agent,))]
+        for agent in COLOURS:
+            # On fog the attention agents count from scratch and with the curriculum alike: same question.
+            members = {"attn_lstm": ("attn_lstm", "curriculum"), "attn_lstm_wide": WIDE}.get(agent, (agent,))
+            group = [r for r in rows if model_key(r)[1] == view and model_key(r)[0] in members]
             if not group:
                 continue
             curves = np.array([[r["return_rate"][f"shift_{s}"] for s in shifts] for r in group])
             for curve in curves:
                 ax.plot(shifts, curve, color=colour(agent), alpha=0.25, linewidth=0.8)
-            ax.plot(shifts, curves.mean(0), color=colour(agent), linewidth=2, marker="o", markersize=4,
+            ax.plot(shifts, curves.mean(0), color=colour(agent), linewidth=2, marker=marker(agent), markersize=4,
                     label=f"{NAMES[agent]} ({len(group)})")
         ax.set_title(f"trained on {VIEW_NAMES[view]}", color=INK)
         ax.set_xticks(shifts)
         ax.set_xlabel("enemy paddle shown shifted by (px)")
         ax.set_ylim(0, 1.03)
     axes[0].set_ylabel("share of balls returned")
-    handles = [plt.Line2D([], [], color=COLOURS[a], linewidth=2, marker="o", markersize=4) for a in COLOURS]
-    fig.legend(handles, [NAMES[a] for a in COLOURS], ncol=3, loc="lower center", bbox_to_anchor=(0.5, 0.98),
+    handles = [plt.Line2D([], [], color=COLOURS[a], linewidth=2, marker=marker(a), markersize=4) for a in COLOURS]
+    fig.legend(handles, [NAMES[a] for a in COLOURS], ncol=4, loc="lower center", bbox_to_anchor=(0.5, 0.98),
                fontsize=7.5)
-    attention = sum(model_key(r)[0] in ("attn_lstm", "curriculum") and model_key(r)[1] == "fog" for r in rows)
-    fig.text(0.5, -0.1, f"Thick: mean; thin: single models (the attention agent on fog: {attention} models, from "
-             "scratch and curriculum). Only the paddle's pixels move, never the ball.", ha="center", color=INK_2,
+    fig.text(0.5, -0.1, "Thick: mean; thin: single models (on fog, the attention agents count from scratch and "
+             "curriculum together). Only the paddle's pixels move, never the ball.", ha="center", color=INK_2,
              fontsize=7)
     save(fig, out, "shift")
 
@@ -220,27 +238,38 @@ def fig_wipes(data: Path, out: Path):
         if key is None or row["view"] != key[1]:
             continue
         rates[key].append([row["totals"][b]["return_rate"] for b in branches])
-    views, agents = ("fog", "fog_mask"), ("cnn", "lstm", "attn_lstm", "curriculum")
-    fig, axes = plt.subplots(len(views), len(agents), figsize=(7.2, 4.6), sharey=True, sharex=True)
+    # Columns: one per agent; the small and the wide attention agent share a panel (small left, wide right).
+    views = ("fog", "fog_mask")
+    columns = ((("cnn",), "CNN (4 frames)"), (("lstm",), "CNN + LSTM"),
+               (("attn_lstm", "attn_lstm_wide"), "attention + LSTM,\nfrom scratch"),
+               (("curriculum", "wide_curriculum"), "attention + LSTM,\ncurriculum"))
+    fig, axes = plt.subplots(len(views), len(columns), figsize=(7.2, 4.6), sharey=True, sharex=True)
     for row, view in enumerate(views):
-        for col, agent in enumerate(agents):
+        for col, (agents, title) in enumerate(columns):
             ax = axes[row][col]
             ax.set_ylim(0, 1.03)
             if row == 0:
-                title = "attention + LSTM, from scratch" if agent == "attn_lstm" else name(agent)
-                ax.set_title(title.replace(", ", ",\n"), color=INK, fontsize=8)
+                ax.set_title(title, color=INK, fontsize=8)
             if col == 0:
                 ax.set_ylabel(f"{VIEW_NAMES[view]}\nshare of balls returned")
             ax.set_xticks(range(len(branches)), labels, rotation=35, ha="right")
-            if (agent, view) not in rates:
-                ax.text(1.5, 0.5, "no model\nlearned this view", ha="center", va="center", color=INK_2,
-                        fontsize=7)
-                continue
-            values = np.array(rates[(agent, view)])
-            for i in range(len(branches)):
-                dots(ax, i, values[:, i], colour(agent) if i else NEUTRAL, width=0.6, hollow=agent == "curriculum")
-            ax.text(0.02, 0.03, f"{len(values)} model{'s' if len(values) > 1 else ''}", transform=ax.transAxes,
-                    fontsize=6.5, color=INK_2)
+            counts = []
+            for k, agent in enumerate(agents):
+                if (agent, view) not in rates:
+                    continue
+                values = np.array(rates[(agent, view)])
+                offset = (k - (len(agents) - 1) / 2) * 0.36
+                for i in range(len(branches)):
+                    dots(ax, i + offset, values[:, i], colour(agent) if i else NEUTRAL,
+                         width=0.6 / len(agents), hollow=hollow(agent), marker=marker(agent))
+                counts.append(f"{len(values)} {'wide' if agent in WIDE else 'small'}" if len(agents) > 1
+                              else f"{len(values)} model{'s' if len(values) > 1 else ''}")
+            ax.text(0.02, 0.03, ", ".join(counts) if counts else "no model learned this view",
+                    transform=ax.transAxes, fontsize=6.5, color=INK_2)
+    handles = [plt.Line2D([], [], marker=m, linestyle="", color=c, markersize=5)
+               for m, c in (("o", COLOURS["attn_lstm"]), ("s", COLOURS["attn_lstm_wide"]))]
+    fig.legend(handles, ["attention agent, small", "attention agent, wide (LSTM's size)"], ncol=2,
+               loc="lower center", bbox_to_anchor=(0.5, 0.98), fontsize=7.5)
     fig.subplots_adjust(hspace=0.15)
     save(fig, out, "wipes")
 
@@ -250,19 +279,20 @@ def fig_probes(data: Path, out: Path):
     curves = defaultdict(lambda: defaultdict(list))
     for row in read_jsonl(data / "probes_random.jsonl"):
         key = model_key(row)
-        if key is None or key[0] == "attn_lstm":
-            continue  # attn_lstm from scratch fails on fog + mask; the curriculum agent stands for it
+        if key is None or key[0] in ("attn_lstm", "attn_lstm_wide"):
+            continue  # the attention agents fail fog + mask from scratch; the curriculum agents stand for them
         for source in ("memory", "random"):
             curves[key][source].append([row["probes"]["now"][source][b] for b, _ in bins])
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.5), sharey=True)
     for ax, view in zip(axes, ("fog", "fog_mask")):
-        for agent in ("cnn", "lstm", "curriculum"):
+        for agent in ("cnn", "lstm", "curriculum", "wide_curriculum"):
             if (agent, view) not in curves:
                 continue
             for source, style in (("memory", "-"), ("random", (0, (3, 2)))):
                 mean = np.mean(curves[(agent, view)][source], axis=0)
                 ax.plot(range(len(bins)), mean, color=colour(agent), linestyle=style, linewidth=2 if
-                        source == "memory" else 1.4, marker="o" if source == "memory" else None, markersize=4,
+                        source == "memory" else 1.4, marker=marker(agent) if source == "memory" else None,
+                        markersize=4,
                         label=name(agent) if source == "memory" else None)
         ax.set_title(f"{VIEW_NAMES[view]}", color=INK)
         ax.set_xticks(range(len(bins)), [b for _, b in bins])
@@ -287,32 +317,43 @@ def fig_block(data: Path, out: Path):
     models = []
     for row in read_jsonl(data / "attention_block.jsonl"):
         key = model_key(row)
-        if key is None or key[1] != "fog_mask" or row["arch"] != "attn_lstm":
+        if key is None or key[1] != "fog_mask" or row["arch"] not in ("attn_lstm", "attn_lstm_wide"):
             continue
         if row["branches"]["control"]["return_rate"] < 0.5:
             continue  # scratch seeds that never learned the view: nothing to block
         models.append((key[0], row["run"].split("/")[-1].replace("seed_", "s"), row["branches"]))
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.5))
     for agent, seed, result in models:
-        hollow = agent == "curriculum"
+        c = colour(agent)
         for ax, metric in zip(axes, ("return_rate", "probe_mae")):
             values = [result[b][metric] for b in branches]
-            ax.plot(range(len(branches)), values, color=COLOURS["attn_lstm"], alpha=0.5, linewidth=0.9)
-            ax.scatter(range(len(branches)), values, s=20, zorder=3, color=COLOURS["attn_lstm"],
-                       facecolor="white" if hollow else COLOURS["attn_lstm"], linewidths=1.2)
+            if metric == "probe_mae":
+                values = [min(v, 40) for v in values]  # see the annotation below
+            ax.plot(range(len(branches)), values, color=c, alpha=0.5, linewidth=0.9)
+            ax.scatter(range(len(branches)), values, s=20, zorder=3, color=c, marker=marker(agent),
+                       facecolor="white" if hollow(agent) else c, linewidths=1.2)
     for ax in axes:
         ax.set_xticks(range(len(branches)), labels, rotation=20, ha="right")
         ax.set_xlim(-0.3, len(branches) - 0.7)
-    curriculum = sum(agent == "curriculum" for agent, _, _ in models)
-    handles = [plt.Line2D([], [], marker="o", linestyle="", color=COLOURS["attn_lstm"], markerfacecolor=face)
-               for face in ("white", COLOURS["attn_lstm"])]
-    axes[0].legend(handles, [f"curriculum ({curriculum} seeds)", f"from scratch ({len(models) - curriculum} seed)"],
-                   fontsize=7, loc="lower left")
+    agents = ("curriculum", "attn_lstm", "wide_curriculum", "attn_lstm_wide")
+    count = {a: sum(agent == a for agent, _, _ in models) for a in agents}
+    handles = [plt.Line2D([], [], marker=marker(a), linestyle="", color=colour(a),
+                          markerfacecolor="white" if hollow(a) else colour(a)) for a in agents]
+    labels_ = [f"{'wide' if a in WIDE else 'small'}, {'curriculum' if hollow(a) else 'from scratch'} ({count[a]})"
+               for a in agents]
+    axes[0].legend(handles, labels_, fontsize=6.5, loc="lower left")
     fig.subplots_adjust(wspace=0.35)
     axes[0].set_ylabel("share of balls returned")
     axes[0].set_ylim(0, 1.03)
     axes[1].set_ylabel("memory error on the hidden ball (px)")
-    fig.suptitle("attention + LSTM on fog + hidden paddle: attention changed just before the fog",
+    top = 40  # one wide scratch model, still learning, has an outlying error under erasure: drawn at the edge
+    for agent, seed, result in models:
+        value = result["erase_ball"]["probe_mae"]
+        if value > top:
+            axes[1].annotate(f"{value:.0f}", (len(branches) - 1, top), xytext=(6, -3), textcoords="offset points",
+                             fontsize=6.5, color=INK_2)
+    axes[1].set_ylim(-1, top)
+    fig.suptitle("attention agents on fog + hidden paddle: attention changed just before the fog",
                  fontsize=8.5, color=INK, y=1.02)
     save(fig, out, "block")
 
