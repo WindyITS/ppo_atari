@@ -24,6 +24,17 @@ steps: hidden ball inside the agent's half). In the control branch the script al
 went to the ball's own cell while it was visible, for the correlational version of the question.
 Output: JSON lines (default analysis/attention_block.jsonl; the first run, attn_lstm only and without erase_ball,
 is archive/analysis/attention_block.v1.jsonl on the host), one row per checkpoint; reruns skip done rows.
+
+--controls (E16, review of 2026-11-13) replays the same flights in branches that test whether the block works
+by removing the ball or by disturbing the network, and writes them to analysis/attention_block_controls.jsonl:
+    control, block_ball, erase_ball   as above (so the controls are compared on the same flights)
+    block_matched  at each step the cells with the most attention outside the ball's block and the paddles'
+                   columns are blocked until they hold at least as much attention as the ball's block: the same
+                   attention mass removed as by block_ball, but not from the ball (the sham removes less)
+    erase_block    the ball erased and its block blocked: any harm beyond erase_ball is not about the ball
+Every branch also records the attention mass its block removed (from a side-effect-free forward pass before the
+step) and the error of a second probe, for the agent's own paddle height (always visible): a block that only
+removes the ball should leave that probe as good as in control.
 """
 
 import argparse
@@ -50,10 +61,29 @@ ALPHAS = (0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0)
 PADDLE_X, RETURN_X, MAX_STEPS = 70.0, 40.0, 150
 BRANCHES = ("control", "control_b", "block_ball", "block_sham", "erase_ball")
 LSTM_BRANCHES = ("control", "control_b", "erase_ball")
+CONTROL_BRANCHES = ("control", "block_ball", "block_matched", "erase_ball", "erase_block")
+CONTROLS = False  # set by --controls
 
 
 def branches_for(arch: str) -> tuple:
+    if CONTROLS:
+        return CONTROL_BRANCHES
     return BRANCHES if arch.startswith("attn_lstm") else LSTM_BRANCHES
+
+
+def matched_block(weights: np.ndarray, ball_block: np.ndarray) -> np.ndarray:
+    """bool (49,): the highest-attention cells outside the ball's block and the paddles' columns, taken in order
+    until they hold at least the attention mass of the ball's block (weights: (49,), mean over heads)."""
+    allowed = np.zeros((GRID, GRID), bool)
+    allowed[:, BLOCK_COLUMNS[0]:BLOCK_COLUMNS[1] + 1] = True
+    allowed = allowed.reshape(-1) & ~ball_block
+    target = weights[ball_block].sum()
+    mask = np.zeros(GRID * GRID, bool)
+    for cell in np.argsort(-np.where(allowed, weights, -np.inf)):
+        if not allowed[cell] or (mask.any() and weights[mask].sum() >= target):
+            break
+        mask[cell] = True
+    return mask
 
 
 def erase_ball(obs: np.ndarray) -> np.ndarray:
@@ -103,13 +133,14 @@ def r2(y, p):
     return float(1 - ((y - p) ** 2).sum() / ss) if ss > 0 else float("nan")
 
 
-def train_probe(recording: Path) -> tuple:
-    """Ridge probe [h, c] -> ball height on the hidden steps of incoming passes; returns (predict, cv R^2)."""
+def train_probe(recording: Path, target: str = "ball_y") -> tuple:
+    """Ridge probe [h, c] -> target (ball_y or agent_y) on the hidden steps of incoming passes; returns
+    (predict, cv R^2)."""
     arrays, _ = load(recording)
     passes = incoming_passes(arrays)
     rows = np.concatenate([p.rows[p.hidden] for p in passes])
     X = np.concatenate([arrays["h"], arrays["c"]], axis=1)[rows].astype(float)
-    y = arrays["ball_y"][rows].astype(float)
+    y = arrays[target][rows].astype(float)
     groups = arrays["game"][rows]
     keep = np.isfinite(y)
     X, y, groups = X[keep], y[keep], groups[keep]
@@ -129,40 +160,56 @@ def train_probe(recording: Path) -> tuple:
 
 # ----- the experiment -----
 
-def play_branch(player: Player, branch: str, probe) -> dict:
+def play_branch(player: Player, branch: str, probe, paddle_probe=None) -> dict:
     previous_x, reached = None, False
-    errors, truth, preds, looked = [], [], [], []
+    errors, truth, preds, looked, removed, paddle_errors = [], [], [], [], [], []
+
+    def result(outcome):
+        return {"outcome": outcome, "errors": errors, "truth": truth, "preds": preds, "looked": looked,
+                "removed": removed, "paddle_errors": paddle_errors}
+
     for k in range(MAX_STEPS):
         if player.done:
-            return {"outcome": "undecided", "errors": errors, "truth": truth, "preds": preds, "looked": looked}
+            return result("undecided")
         where = player.scene_now()
         x, y = where["ball_x"], where["ball_y"]
         blocked, transform = None, None
         before_fog = x == x and x < WINDOW_START
-        if before_fog and branch == "erase_ball":
+        if before_fog and branch in ("erase_ball", "erase_block"):
             transform = erase_ball
-        if before_fog and branch in ("block_ball", "block_sham"):
+        if before_fog and branch in ("block_ball", "block_sham", "block_matched", "erase_block"):
             row, col = ball_cell(x, y)
-            blocked = block_around(row if branch == "block_ball" else sham_row(row), col)
+            ball_block = block_around(row, col)
+            seen = player.obs if transform is None else transform(player.obs)
+            weights = player.forward(seen, player.state)[2]["attention"].mean(0)  # no side effects
+            if branch == "block_sham":
+                blocked = block_around(sham_row(row), col)
+            elif branch == "block_matched":
+                blocked = matched_block(weights, ball_block)
+            else:
+                blocked = ball_block
+            removed.append(float(weights[blocked].sum()))
         if not reached and x == x and x >= PADDLE_X:
             reached = True
         if reached and x == x and previous_x is not None and x < previous_x and x < RETURN_X:
-            return {"outcome": "returned", "errors": errors, "truth": truth, "preds": preds, "looked": looked}
+            return result("returned")
         step = player.step(transform=transform, blocked=blocked)
         if before_fog and branch == "control" and "attention" in step.internals:
             row, col = ball_cell(x, y)
             looked.append(float(step.internals["attention"][:, row * GRID + col].sum()))
         inside = x == x and WINDOW_START <= x < WINDOW_END and not where["visible"] and not reached
         if inside:
-            p = float(probe(np.concatenate([step.internals["h"], step.internals["c"]]))[0])
+            memory = np.concatenate([step.internals["h"], step.internals["c"]])
+            p = float(probe(memory)[0])
             preds.append(p)
             truth.append(float(y))
             errors.append(abs(p - y))
+            if paddle_probe is not None and where["agent_y"] == where["agent_y"]:
+                paddle_errors.append(abs(float(paddle_probe(memory)[0]) - where["agent_y"]))
         if step.reward != 0:
-            return {"outcome": "returned" if step.reward > 0 else "missed", "errors": errors, "truth": truth,
-                    "preds": preds, "looked": looked}
+            return result("returned" if step.reward > 0 else "missed")
         previous_x = x if x == x else previous_x
-    return {"outcome": "undecided", "errors": errors, "truth": truth, "preds": preds, "looked": looked}
+    return result("undecided")
 
 
 def recording_for(checkpoint: Path, rollouts: Path) -> Path:
@@ -173,10 +220,13 @@ def recording_for(checkpoint: Path, rollouts: Path) -> Path:
     return rollouts / f"{name}.npz"
 
 
-def run(path: Path, episodes: int, seed: int, max_events: int, rollouts: Path) -> dict:
+def run(path: Path, episodes: int, seed: int, max_events: int, rollouts: Path, controls: bool = False) -> dict:
+    global CONTROLS
+    CONTROLS = controls  # set here too: worker processes may not inherit main()'s setting
     torch.set_num_threads(1)
     recording = recording_for(path, rollouts)
     probe, probe_r2 = train_probe(recording)
+    paddle_probe = train_probe(recording, "agent_y")[0] if CONTROLS else None
     player = Player(path)
     events = []
     try:
@@ -196,7 +246,7 @@ def run(path: Path, episodes: int, seed: int, max_events: int, rollouts: Path) -
                     outcomes = {}
                     for branch in branches_for(player.arch):
                         player.load(saved, reseed=branch_seed + (1 if branch == "control_b" else 0))
-                        outcomes[branch] = play_branch(player, branch, probe)
+                        outcomes[branch] = play_branch(player, branch, probe, paddle_probe)
                     player.load(saved)
                     events.append({"game": game, "t": player.t, "outcomes": outcomes})
                 player.step()
@@ -217,6 +267,12 @@ def summarize(path, player, events, probe_r2, recording, episodes, seed) -> dict
         per_branch[b] = {"return_rate": sum(o == "returned" for o in decided) / len(decided) if decided else None,
                          "probe_mae": float(np.mean(np.abs(preds - truth))) if len(truth) else None,
                          "probe_r2": r2(truth, preds) if len(truth) > 20 else None, "hidden_steps": int(len(truth))}
+        removed = [v for e in events for v in e["outcomes"][b].get("removed", [])]
+        paddle = [v for e in events for v in e["outcomes"][b].get("paddle_errors", [])]
+        if removed:
+            per_branch[b]["removed_attention"] = float(np.mean(removed))
+        if paddle:
+            per_branch[b]["paddle_probe_mae"] = float(np.mean(paddle))
     # paired per-event differences against control (events where both have hidden steps)
     paired = {}
     for b in names[1:]:
@@ -226,6 +282,11 @@ def summarize(path, player, events, probe_r2, recording, episodes, seed) -> dict
              for e in events if "undecided" not in (e["outcomes"][b]["outcome"], e["outcomes"]["control"]["outcome"])]
         paired[b] = {"mae_change": bootstrap(np.asarray(d, float)), "return_change": bootstrap(np.asarray(r, float))}
     # correlational: attention on the ball's cell before the fog vs probe error in the fog (control branch)
+    if CONTROLS:  # the correlational measure needs control_b's companion analysis; not repeated here
+        return {"checkpoint": str(path), "arch": player.arch, "train_view": player.train_view, "view": player.view,
+                "kind": player.checkpoint.get("kind", "scratch"), "run": player.checkpoint.get("run"),
+                "episodes": episodes, "seed": seed, "events": len(events), "recording": str(recording),
+                "probe_cv_r2": probe_r2, "branches": per_branch, "paired": paired}
     looked = [np.mean(e["outcomes"]["control"]["looked"]) for e in events
               if e["outcomes"]["control"]["looked"] and e["outcomes"]["control"]["errors"]]
     error = [np.mean(e["outcomes"]["control"]["errors"]) for e in events
@@ -268,7 +329,7 @@ def describe(row: dict) -> str:
     return (f"{row['events']} events, probe cv R2 {f(row['probe_cv_r2'])}; return " +
             " ".join(f"{k}:{f(v['return_rate'])}" for k, v in b.items()) + "; probe MAE " +
             " ".join(f"{k}:{f(v['probe_mae'], 1)}" for k, v in b.items()) +
-            f"; looked-vs-error rho {f(row['looked_vs_error']['spearman'])}")
+            ("" if "looked_vs_error" not in row else f"; looked-vs-error rho {f(row['looked_vs_error']['spearman'])}"))
 
 
 def main():
@@ -280,12 +341,19 @@ def main():
     parser.add_argument("--seed", type=int, default=20_000)
     parser.add_argument("--max-events", type=int, default=20, help="per game")
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--output", type=Path, default=Path("analysis/attention_block.jsonl"))
+    parser.add_argument("--output", type=Path, default=None,
+                        help="default analysis/attention_block.jsonl (analysis/attention_block_controls.jsonl with --controls)")
+    parser.add_argument("--controls", action="store_true", help="the E16 control branches (see above)")
     args = parser.parse_args()
+    global CONTROLS
+    CONTROLS = args.controls
+    if args.output is None:
+        args.output = Path("analysis/attention_block_controls.jsonl" if CONTROLS else "analysis/attention_block.jsonl")
     paths = [p.resolve().relative_to(Path.cwd()) if p.is_absolute() else p
              for p in (args.checkpoints or default_checkpoints(args.root))]
     failures = run_all(functools.partial(run, episodes=args.episodes, seed=args.seed, max_events=args.max_events,
-                                         rollouts=args.rollouts), paths, args.output, "checkpoint", args.workers,
+                                         rollouts=args.rollouts, controls=CONTROLS), paths, args.output, "checkpoint",
+                       args.workers,
                        describe)
     sys.exit(1 if failures else 0)
 
