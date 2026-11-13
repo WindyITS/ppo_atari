@@ -13,8 +13,6 @@
 \captionsetup{font=small,labelfont=bf}
 \graphicspath{{../figures/}}
 
-% Marks text that waits on a running experiment; remove every \pending before submission.
-\newcommand{\pending}[1]{{\color{red!70!black}[#1]}}
 \newcommand{\Rsq}{$R^2$}
 
 \title{Remembering a Ball You Cannot See:\\Shortcuts, Memory and Attention in Occluded Pong}
@@ -25,22 +23,20 @@
 \maketitle
 
 \begin{abstract}
-Pong is easy for reinforcement-learning agents to win, but often for the wrong reason: they read the ball's
-position off the opponent's paddle, which follows the ball almost perfectly. We make the shortcut and the
-ball harder to use. A fog hides the ball in the agent's half of the court, and a mask hides the opponent's
-paddle. We then ask whether agents learn to remember a ball they can no longer see, and whether they use
-their architecture's tools to do it. We train three agents with PPO: a CNN on four stacked frames, a CNN with
-an LSTM memory, and a CNN whose LSTM reads the frame through memory-steered spatial attention. We then open
-them with linear probes, memory wipes and attention blocking. Under fog with the opponent's paddle visible,
-every agent still plays through that paddle and loses every point without it. Only when both are hidden do
-the agents remember the ball. The LSTM's memory then holds the hidden ball's height, and wiping it as the
-ball disappears cuts the share of balls returned from 98\% to 30\%. The attention agent remembers only what
-its attention let in: blocking its attention to the ball just before the fog erases the ball from its
-memory and makes it miss. The memoryless CNN finds another way. It moves early and lets its own paddle
-carry the information through the fog. The attention agent rarely learns the hardest view from scratch (1
-of 3 seeds), but always learns it after pre-training on the clean game. A wider attention agent, as large
-as the LSTM agent, learns the partly occluded views with every seed and no longer stalls on the hardest one,
-but is still far slower there than the LSTM, so size explains only part of the gap.
+Agents that win Pong often read the ball's height off the opponent's paddle, which follows the ball. We hide
+the ball in the agent's half of the court (fog), the opponent's paddle (mask), or both, and ask whether agents
+then learn to remember a ball they cannot see, and how hard that is to learn. We train three PPO agents of
+similar size that differ in how they carry information over time: a CNN on four stacked frames, a CNN with an
+LSTM, and a CNN whose LSTM reads the frame through attention steered by its own memory. We test them with
+interventions: memory wipes, attention blocking, and edits of what the agent sees. Under fog with the
+opponent's paddle visible, every agent depends on that paddle: erasing it costs almost every point. With
+both hidden, the LSTM holds the hidden ball in its memory and acts on it: wiping the memory as the ball
+disappears cuts the share of balls it returns from 0.98 to 0.30. When one of the attention agent's heads
+tracks the ball, the agent remembers what that head lets in: blocking the head's view of the ball before the
+fog makes two of four models miss most balls, while removing as much attention elsewhere costs nothing. The
+memoryless CNN does not track the ball at all: with the ball erased from its view for the whole flight, it
+still returns 0.80--0.94 of the balls, having learned where they come back. The attention agent learns the fully occluded view from scratch with one
+seed of three, but with all three after pre-training on the clean game.
 \end{abstract}
 
 \section{Introduction}
@@ -50,45 +46,43 @@ Pong was among the first Atari games solved from pixels by deep reinforcement le
 however, does not mean the agent has understood it. \citet{delfosse2024scobots} found that agents trained on
 Pong track the opponent's paddle rather than the ball. The built-in opponent follows the ball closely, so
 its height is a good proxy for the ball's. HackAtari \citep{delfosse2024hackatari} confirmed the diagnosis:
-when the opponent stops moving, the agents fall apart. This is a case of shortcut learning
-\citep{geirhos2020shortcut}. A cue that works on the training distribution replaces the one the task is
-about.
+when the opponent stops moving, the agents fall apart. This is shortcut learning \citep{geirhos2020shortcut}:
+a cue that works on the training distribution replaces the one the task is about.
 
 We use this to build a controlled test of memory. A \emph{fog} hides the ball in the agent's half of the
 court, so the ball vanishes on its way towards the agent and reappears only at its paddle. A \emph{mask}
 hides the opponent's paddle. With both, the agent cannot see the ball when it matters, nor anything that
-tracks it. To return the ball it must carry the ball's position and velocity through the fog itself. The
-question is simple: \emph{can agents learn to remember a ball they can no longer see, and do they use the
-tools in their architecture to do it?}
+tracks it. We ask two questions. \emph{Do agents learn to remember a ball they can no longer see, using the
+tools their architecture gives them?} And \emph{how hard is that memory to learn?}
 
-We compare three agents that differ only in how they carry information over time:
-\begin{itemize}
-  \item a \textbf{CNN} on four stacked frames, the DQN setup, with no memory beyond the stack;
-  \item a \textbf{CNN + LSTM}, which sees one frame per step and keeps a recurrent memory
-    \citep{hausknecht2015drqn};
-  \item a \textbf{CNN + attention + LSTM}, a simplified version of \citet{mott2019attention}, whose memory
-    decides where on the frame its attention looks.
-\end{itemize}
-The attention agent is much smaller than the other two, so we also train a wide version of it with the
-LSTM agent's parameter count. We train each on all four combinations of fog and mask and then look inside
-them with causal tests.
+We compare three agents of similar size that differ only in how they carry information over time: a
+\textbf{CNN} on four stacked frames, the DQN setup; an \textbf{LSTM} agent, which sees one frame per step
+and keeps a recurrent memory \citep{hausknecht2015drqn}; and an \textbf{attention} agent, a simplified
+version of \citet{mott2019attention}, whose memory decides where on the frame its attention looks. We
+train each on the four combinations of fog and mask and test them with interventions rather than
+correlations.
 
 \paragraph{Findings.}
 \begin{enumerate}
-  \item The shortcut survives the fog. With only the ball hidden, every agent plays through the opponent's
-    paddle: erasing or mirroring that paddle costs it every point, and moving it by 4\,px most of them.
-  \item With the shortcut gone, the memory agents remember the ball. A linear probe reads the hidden ball's
-    height from the LSTM's state (\Rsq{} 0.87--0.97, against 0.27--0.58 for an untrained network). Wiping that
-    state as the ball disappears cuts the share of balls returned from 0.98 to 0.30.
-  \item The attention agent remembers what it looked at. Blocking its attention to the ball just before the
-    fog leaves the ball out of its memory and makes it miss most balls in 6 of 10 models, small and wide.
-    The same block elsewhere changes nothing.
-  \item The memoryless CNN commits early. It moves its paddle while the ball is still visible and holds it
-    there, so its own paddle carries the information through the fog.
-  \item The attention agent fails the hardest view from scratch in 2 of 3 seeds, but pre-training on the
-    clean game for 10M steps and fine-tuning for 5M (the same 15M total) makes all three seeds win. At the
-    LSTM's size it no longer stalls but still wins with only one seed, so size explains only part of this.
+  \item \textbf{The shortcut survives the fog.} With only the ball hidden, every agent depends on the
+    opponent's paddle: erasing or mirroring it costs almost every point, and moving it by 4--8 pixels most
+    balls. It is necessary but not always sufficient: erasing the ball while it is still visible also costs
+    most memory agents part of their returns.
+  \item \textbf{With the shortcut gone, the LSTM remembers the ball.} A linear probe reads the hidden ball's
+    height from its memory (\Rsq{} 0.87--0.97, against 0.38--0.58 for an untrained LSTM), and wiping that
+    memory as the ball disappears cuts the share of balls returned from 0.98 to 0.30.
+  \item \textbf{The attention agent remembers what its ball head lets in.} In models where a head tracks the
+    ball, blocking that view before the fog removes the ball from memory; in two of four models the agent
+    then misses most balls, while removing the same amount of attention elsewhere changes nothing.
+  \item \textbf{The CNN plays without seeing the ball.} On fog + hidden paddle it returns as many balls with
+    the ball erased from its view for the whole flight (0.80--0.94, against 0.85--0.97): it has learned where
+    the ball comes back, not where it is.
+  \item \textbf{The attention agent's memory is hard to learn from scratch.} It learns the fully occluded
+    view with one seed of three, but with all three after 10M steps on the clean game and 5M on the
+    occluded one.
 \end{enumerate}
+Throughout, only interventions separate what an agent uses from what merely correlates with its behaviour:
+natural attention, decodability and early movement each turn out to be poor guides on their own.
 
 \section{Setup}
 
@@ -105,341 +99,349 @@ them with causal tests.
 \end{figure}
 
 \paragraph{Environment.} We use ALE Pong \citep{bellemare2013ale} through Gymnasium with the standard
-preprocessing \citep{machado2018revisiting}: $84\times84$ grayscale frames, frame skip 4, up to 30 no-op
-starts, and no sticky actions. The occlusions are applied to the observation only, so the game itself is
-unchanged. Figure~\ref{fig:views} shows the four views: \textbf{clean}, \textbf{hidden paddle} (mask),
-\textbf{fog}, and \textbf{fog + hidden paddle}. Under fog, an incoming ball is invisible for about 14 agent
-steps. For analysis, every frame's object positions are read from the unoccluded frame, which the agent
-never sees.
+preprocessing \citep{machado2018revisiting}: $84\times84$ grayscale frames, frame skip 4 (one agent step is
+four emulator frames), up to 30 no-op starts, and no sticky actions. The occlusions are applied to the
+observation only, so the game itself is unchanged. Figure~\ref{fig:views} shows the four views:
+\textbf{clean}, \textbf{hidden paddle} (mask), \textbf{fog} (columns 42--71 of the frame), and \textbf{fog +
+hidden paddle}. Under fog an incoming ball is invisible for about 14 agent steps; we call the step it
+disappears \emph{fog entry}. For analysis, object positions are read from the unoccluded frame, which the
+agent never sees.
 
-\paragraph{Agents.} All agents share the Nature-CNN convolutions \citep{mnih2015human} and the actor
-and critic heads (Table~\ref{tab:agents}).
+\paragraph{Agents.} All agents share the Nature-CNN convolutions (three convolutional layers;
+\citep{mnih2015human}) and separate linear actor and critic heads. They differ in what they keep from one
+step to the next (Table~\ref{tab:agents}).
 \begin{itemize}
-  \item \textbf{CNN} sees four stacked frames and maps them to 512 features.
-  \item \textbf{CNN + LSTM} sees one frame per step; its 512 features feed an LSTM with 128 units
+  \item The \textbf{CNN} sees four stacked frames and maps them to 512 features. Its only memory is the stack.
+  \item The \textbf{LSTM} agent sees one frame per step; its 512 features feed an LSTM with 128 units
     \citep{hochreiter1997lstm}.
-  \item \textbf{CNN + attention + LSTM} also sees one frame. Its convolutions produce a $7\times7$ map of 64
-    features, to which two fixed channels add each cell's $x$ and $y$ position. Each of two heads scores the
-    49 cells with a query computed from the LSTM's previous hidden state $h_{t-1}$. The softmax-weighted sum
-    of the cells' values (the readout) is the LSTM's only input. What the agent remembers therefore decides
-    what it looks at next. We layer-normalise queries and keys, without a learned scale; without this the
-    attention stays uniform at initialisation and never learns where to look. It has 7--9 times fewer
-    parameters than the other two.
-  \item \textbf{Wide attention agent}, the same design at the LSTM agent's size (1.98M parameters, within
-    1.1\%): the same 128-unit memory, but eight heads, ReLU values of 320 units and a 512-unit ReLU layer
-    after the readout. It rules out size as the explanation of any difference between the attention agent
-    and the others; unless stated otherwise, \emph{the attention agent} means both sizes.
+  \item The \textbf{attention} agent also sees one frame. Its convolutions produce a $7\times7$ map of 64
+    features, to which two fixed channels add each cell's $x$ and $y$ position. Each of eight heads scores
+    the 49 cells with a query computed from the LSTM's previous hidden state $h_{t-1}$; the softmax-weighted
+    sums of the cells' values (320 ReLU units per head) pass through a 512-unit ReLU layer into a 128-unit
+    LSTM. This readout is the LSTM's only input, so what the agent remembers decides what it looks at next.
+    We layer-normalise queries and keys without a learned scale; without this the attention stays uniform at
+    initialisation and never learns where to look. The agent was widened to the LSTM agent's parameter count,
+    so that differences between them are not a matter of size.
 \end{itemize}
 
 \begin{table}[t]
   \centering
   \small
-  \begin{tabular}{lccc}
+  \begin{tabular}{llll}
     \toprule
     agent & input per step & memory & parameters \\
     \midrule
-    CNN & 4 stacked frames & none & 1.69M \\
-    CNN + LSTM & 1 frame & LSTM, 128 units & 2.01M \\
-    CNN + attention + LSTM & 1 frame & LSTM, 128 units; 2 attention heads & 0.23M \\
-    \quad wide & 1 frame & LSTM, 128 units; 8 attention heads & 1.98M \\
+    CNN & 4 stacked frames & none (the stack) & 1.69M \\
+    LSTM & 1 frame & LSTM, 128 units & 2.01M \\
+    attention & 1 frame & LSTM, 128 units, fed by 8 attention heads & 1.98M \\
     \bottomrule
   \end{tabular}
-  \caption{The agents. All use the Nature-CNN convolutions and the same PPO hyperparameters.}
+  \caption{The three agents. All use the Nature-CNN convolutions and the same PPO hyperparameters.}
   \label{tab:agents}
 \end{table}
 
-\paragraph{Training.} PPO \citep{schulman2017ppo} follows CleanRL \citep{huang2022cleanrl}. It uses 16
-parallel games, 256 steps per game per update, 4 epochs of 4 minibatches, $\gamma=0.99$, GAE
-$\lambda=0.95$, clip 0.1, entropy coefficient 0.02 and Adam with learning rate $10^{-3}$ annealed linearly
-to zero. The recurrent agents are trained on whole 256-step sequences, with the memory reset at the end of
-each game. Every agent is trained from scratch on every view for 15M agent steps, with three seeds. For
-the two attention agents, the \emph{curriculum} variant starts from the clean model's 10M-step checkpoint and is fine-tuned on the target
-view for 5M steps, with a fresh optimiser and the learning rate restarted and annealed over those 5M steps.
-Its total, 15M steps, equals the scratch budget.
+\paragraph{Training.} PPO \citep{schulman2017ppo} follows CleanRL \citep{huang2022cleanrl}: 16 parallel
+games, 256 steps per game per update, 4 epochs of 4 minibatches, $\gamma=0.99$, GAE $\lambda=0.95$, clip
+0.1, entropy coefficient 0.02, and Adam with learning rate $10^{-3}$ annealed linearly to zero. The recurrent
+agents are trained on whole 256-step sequences, with the memory reset at the end of each game. Every agent is
+trained from scratch on every view for 15M agent steps, with three seeds. The attention agent is also trained
+with a \emph{curriculum}: its clean model's 10M-step checkpoint is fine-tuned on each occluded view for 5M
+steps, with a fresh optimiser and the learning rate restarted and annealed over those steps, for the same
+15M total. As controls, the CNN and LSTM are fine-tuned from their clean models in the same way, for 5M and
+for 15M steps.
 
 \paragraph{Evaluation.} Each frozen model plays 30 games against the built-in opponent, with environment
 seeds 10000--10029 and its stochastic policy. A game's return is points won minus points lost, from $-21$ to
-$+21$. The causal tests replay each ball flying towards the agent from an exact emulator snapshot. They then
-compare the share of these balls the agent returns under an untouched branch and under an intervention. A
-second untouched branch, with different action noise, agrees with the first within 0.04 everywhere.
+$+21$; a model \emph{wins} a view if it wins most of its 30 games. The causal tests replay every ball flying
+towards the agent from an exact emulator snapshot, in several branches that differ only by one intervention,
+and compare the \emph{share of balls returned}. A model \emph{plays} a view if it returns at least half of
+the balls without intervention; a model can return 80\% of the balls and still lose games, because the
+opponent wins long rallies. A second unmodified replay, with different action noise, agrees with the first
+within 0.04 everywhere.
 
 \section{Results}
 
-\subsection{Fog plus hidden paddle separates the agents}
+\subsection{What each agent learns}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{returns}
-  \caption{Mean return of each final model on the view it was trained on (bars: mean over seeds; dots:
-    seeds; 30 games each). Squares: the wide attention agent. Curriculum runs (hollow) are pre-trained on the
-    clean view for 10M steps and fine-tuned on the target view for 5M.}
+  \caption{Mean return of each final model on the view it was trained on (bars and ticks: mean over seeds;
+    dots: seeds; 30 games each). Hollow: the attention agent's curriculum, pre-trained on the clean view for
+    10M steps and fine-tuned on the target view for 5M (there is none for the clean view).}
   \label{fig:returns}
 \end{figure}
 
-Figure~\ref{fig:returns} shows how well each agent plays its own view.
+Figure~\ref{fig:returns} shows how well each model plays its own view.
 \begin{itemize}
-  \item \textbf{Every agent learns the clean, hidden-paddle and fog views.} The one exception is the
-    attention agent from scratch, which fails one seed on the hidden-paddle and fog views; a wider
-    attention agent of the LSTM's size does not (Section~\ref{sec:wide}).
-  \item \textbf{Fog + hidden paddle separates them.} The LSTM agent wins with every seed ($+20.2$ on
-    average). Surprisingly, the memoryless CNN wins with two of three seeds ($+19.8$, $+19.1$, $+1.6$). The
-    attention agent wins with only one, at either size ($-7.0$ and $+1.4$ on average).
-  \item \textbf{The curriculum rescues the attention agent.} Fine-tuned from its clean model, it wins with
-    all three seeds at both sizes ($+18.1$ to $+20.6$) within about 3M steps.
+  \item \textbf{Every agent learns the clean, hidden-paddle and fog views}, with every seed ($+17.0$ to
+    $+20.9$), from scratch and with the curriculum.
+  \item \textbf{Fog + hidden paddle separates them.} The LSTM agent wins with every seed ($+20.4$, $+19.3$,
+    $+20.8$). The memoryless CNN wins with two ($+19.8$, $+19.1$, $+1.6$). The attention agent wins with one
+    ($+19.5$, $-11.1$, $-4.2$), but with all three after the curriculum ($+18.1$ to $+20.6$).
+  \item \textbf{Every model is a specialist.} A fog + hidden paddle model scores about $-20$ on every other
+    view, including the clean one, and a clean model about $-20$ on the fogged ones.
 \end{itemize}
+Section~\ref{sec:learning} returns to how these models were learned. First we ask how they play.
 
-The same short fine-tuning is not enough for the other two agents. With 5M steps, the CNN and LSTM
-fine-tunes are still losing on fog + hidden paddle ($-15.5$ and $-8.9$). This is not negative transfer: with
-the scratch budget and schedule (15M fine-tuning steps), every CNN and LSTM fine-tune wins. Two of the LSTM
-fine-tunes even learn faster than scratch ($+9.1$ and $+13.8$ after 2M steps, against $-8.7$ and $-8.2$). The
-CNN from scratch needs 7.5--10M steps before it takes off, so 5M steps could not have been enough. Clean
-pre-training is therefore a good start for every agent. For the attention agent it is the difference
-between failing and winning.
-
-Every model is a specialist. A fog + hidden paddle model loses about $-20$ on every other view, including the
-clean one: a ball visible in its own half is out of distribution for it.
-
-\subsection{Under fog, every agent plays through the opponent's paddle}
+\subsection{Under fog, every agent depends on the opponent's paddle}
+\label{sec:shortcut}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.9\linewidth]{shift}
-  \caption{Share of balls returned when the opponent's paddle the model sees is moved by $-8$ to $+8$\,px.
-    Only the paddle's pixels move; the ball and the game are unchanged. Left: models trained on the clean
-    view. Right: models trained on fog. Squares: the wide attention agent.}
+  \caption{Share of balls returned when the opponent's paddle the model sees is moved by $-8$ to $+8$ pixels
+    ($+$ is down). Only the paddle's pixels move; the ball and the game are unchanged. Thick lines: mean over
+    models; thin lines: single models (the attention agent counts from scratch and with the curriculum).
+    Models that do not play their view are left out. Left: models trained on the clean view. Right: models
+    trained on fog.}
   \label{fig:shift}
 \end{figure}
 
-If the fog really forced the agents to remember the ball, a fog-trained agent would not need the opponent's
-paddle. It does.
+If the fog forced the agents to remember the ball, a fog-trained agent would not need the opponent's
+paddle. But it still does.
 \begin{itemize}
-  \item \textbf{Erasing or mirroring the paddle} makes every fog-trained model, of every architecture,
-    lose almost every point ($-20.1$ to $-21.0$). This holds even though the real ball still reaches its
-    paddle.
-  \item \textbf{A small shift is enough} (Figure~\ref{fig:shift}): moving the paddle the agent sees by
-    4--8\,px, half a paddle's height, costs fog agents most of their returns.
-  \item \textbf{Clean models differ by architecture.} The clean CNN does not notice the shift or the
-    erasure, so it ignores the opponent's paddle. The clean LSTM partly relies on it. The small clean
-    attention agent depends on it almost entirely: its heads put 10--15 times the uniform weight on that
-    paddle's cell, and it collapses when the paddle is hidden. The wide one varies by seed, like the LSTM
-    ($+15.7$, $-20.2$, $-4.6$ with the paddle erased).
-  \item \textbf{The fog attention agents look at the shortcut.} As the ball disappears into the fog, their
-    attention leaves the ball and moves to the opponent's paddle (Figure~\ref{fig:attention}).
+  \item \textbf{Erasing or mirroring the paddle} (flipping it to the opposite height) in what the agent sees
+    makes every fog-trained model lose almost every point ($-20.2$ to $-21.0$), although the real ball
+    still reaches its paddle.
+  \item \textbf{A small shift is enough} (Figure~\ref{fig:shift}). Moving the paddle the agent sees 8
+    pixels up cuts the share of balls returned from 0.90--1.00 to 0.01--0.46 in every fog model, and 4 pixels
+    up already costs 10 of the 12 more than a third of it. Downward shifts cost less and less consistently
+    (0.15--0.89 at 8 pixels). The clean CNN does not notice any shift (0.95 or more), so the effect is not a
+    generic response to an edited frame.
+  \item \textbf{Clean models differ by architecture.} With the paddle erased, the clean CNN still wins
+    ($+20.0$ to $+20.7$); the clean LSTM and attention models depend on it to varying degrees ($+18.8$,
+    $-11.0$, $+7.5$ and $+15.7$, $-20.2$, $-4.6$). The shortcut is not created by the fog: with the ball in
+    full view, the memory agents already use it.
+  \item \textbf{The fog attention models look at it.} Inside the fog, one head of every fog model turns to
+    the opponent's paddle (0.34--0.75 of its weight, against 0.06 for uniform attention;
+    Figure~\ref{fig:attention}).
 \end{itemize}
+How the paddle is read remains open. The direction in which the agents move their own paddle after a shift
+is not consistent: of the 12 fog models, three move against the shift, four move down whichever way the
+paddle is shifted, and five respond in one direction only, or hardly at all, yet still miss.
 
-The agents do not simply copy the opponent's paddle height. When the paddle is shifted, 16 of the 17
-CNN, LSTM and small attention fog agents that play move their own paddle the \emph{opposite} way; three of
-the six wide ones do, and the other three respond erratically but lose as many balls. In Pong, where the ball meets a paddle
-sets its return angle, so one reading is that the agents infer the ball's direction from where it met the
-opponent's paddle. This fits the sign of the effect but is not tested directly.
+The paddle is necessary, but not always sufficient. Erasing the ball while it is still visible, before the
+fog, also costs seven of the nine fog-trained LSTM and attention models part of their returns (from
+0.88--1.00 to 0.26--0.82). With the ball erased for the whole flight, the fog CNN still returns 0.92--0.98
+of the balls, from the paddle alone, while the LSTM returns 0.52--0.95 and the attention agent 0.20--0.94. Scripted players on the same games under fog put this in perspective:
+copying the opponent's paddle returns 0.55 of the balls, going to the ball's last seen height 0.66, and
+extrapolating its seen path 0.88 (0.96 without fog). The trained agents (0.90--1.00) combine both sources.
 
-Scripted players put the shortcut in perspective. On the same games under fog:
-\begin{itemize}
-  \item copying the opponent's paddle returns 55\% of balls;
-  \item going to the ball's last seen height returns 66\%;
-  \item extrapolating its seen path, an ideal short memory, returns 88\% (96\% without fog).
-\end{itemize}
-The shortcut is strong but not enough on its own. The fog + hidden paddle LSTM (98\%) beats ideal
-extrapolation, and the CNN (88\%) matches it.
-
-\subsection{With the shortcut gone, the memory agents remember the ball}
+\subsection{With the shortcut gone, the LSTM remembers the ball}
+\label{sec:lstm}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.8\linewidth]{probes}
-  \caption{How well a linear probe reads the hidden ball's height from each model's internal state (LSTM
-    $[h,c]$; for the CNN, its 512 features), by how many steps the ball has been in the agent's half. Solid:
-    the trained model. Dashed: an untrained network of the same architecture fed the same frames.}
+  \caption{Held-out \Rsq{} of a linear probe for the hidden ball's height from each model's internal state
+    (LSTM $[h,c]$; for the CNN, its 512 features), by steps since fog entry. Solid: the trained model.
+    Dashed: an untrained network of the same architecture fed the same frames. The attention agent is shown
+    with the curriculum, the only variant that wins fog + hidden paddle with every seed. On fog, the dashed
+    lines lie under the solid ones.}
   \label{fig:probes}
 \end{figure}
 
-\paragraph{Probes.} Following \citet{anand2019atariari} and \citet{alain2016probes}, we fit ridge
-regressions, cross-validated over games, from each model's state to the ball's height while it crosses the
-agent's half. To separate memory from input, we also feed every frame to an untrained network of the same
-architecture, with its own memory, and probe it the same way (Figure~\ref{fig:probes}).
+\paragraph{Probes.} Following \citet{alain2016probes} and \citet{anand2019atariari}, we fit ridge
+regressions, cross-validated over games, from each model's state to the ball's height while it is hidden.
+To separate memory from input, every frame is also fed to an untrained network of the same architecture,
+with its own memory, and probed the same way (Figure~\ref{fig:probes}).
 \begin{itemize}
-  \item \textbf{Under fog alone, decodability is not memory.} Eight or more steps in, the hidden ball decodes almost perfectly
-    from every model, including the memoryless CNN and the untrained network (\Rsq{} 0.92--0.99), because the
+  \item \textbf{Under fog alone, decodability is not memory.} Eight or more steps in, the hidden ball decodes
+    almost perfectly from every model and from the untrained networks (\Rsq{} 0.95--0.99), because the
     visible opponent paddle tracks it.
-  \item \textbf{On fog + hidden paddle, only trained memory holds the ball.} Eight or more steps into the
-    fog, the LSTM's memory gives \Rsq{} 0.87--0.97 and the curriculum attention agents' 0.89--0.98 (both
-    sizes), against 0.19--0.70 for the untrained networks.
+  \item \textbf{On fog + hidden paddle, only trained memory holds the ball.} Eight or more steps in, the
+    LSTM's memory gives \Rsq{} 0.87--0.97 against 0.38--0.58 for the untrained LSTM, and the curriculum
+    attention agent's 0.92--0.97 against 0.19--0.70. The CNN's features decode the ball no better than an
+    untrained CNN's (0.40--0.57 against 0.39--0.55).
 \end{itemize}
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.82\linewidth]{wipes}
+  \includegraphics[width=0.85\linewidth]{wipes}
   \caption{Share of balls returned when the memory is wiped (LSTM state set to zero; for the CNN, the frame
-    stack filled with the current frame for four steps) before the fog, as the ball enters it, or seven steps
-    in. Rows: training view. Bars: mean over models; dots: models. Attention panels: the small agent (circles,
-    left) beside the wide one (squares, right).}
+    stack filled with the current frame for four steps) at one of three moments: while the ball is still
+    visible (as it crosses $x=30$, a few steps before the fog); at fog entry; or seven steps after it. Rows: training view.
+    Grey: no wipe. Bars and ticks: mean over models; dots: models; hollow: curriculum.}
   \label{fig:wipes}
 \end{figure}
 
-\paragraph{Memory wipes.} A probe shows that information is present, not that the agent uses it. We
-therefore wipe the memory at three moments and replay each ball (Figure~\ref{fig:wipes}).
+\paragraph{Memory wipes.} A probe shows that information is present, not that it is used. We therefore wipe
+the memory and replay each ball (Figure~\ref{fig:wipes}).
 \begin{itemize}
-  \item \textbf{The fog + hidden paddle LSTM depends on its memory.} A wipe as the ball enters the fog
-    drops the share of balls returned from 0.98 to 0.30, and a wipe seven steps in drops it to 0.17. A wipe
-    before the fog costs nothing, because the ball is seen again.
-  \item \textbf{The fog-only LSTM barely needs memory} (0.85 after a wipe at fog entry): it rebuilds its
-    estimate from the opponent's paddle.
-  \item \textbf{The attention agent depends on its memory most of all.} On fog + hidden paddle, a wipe at
-    fog entry leaves 0.04--0.25 of balls returned (both sizes). Even on fog, with the opponent's paddle in
-    view, it recovers poorly (0.17--0.72).
+  \item \textbf{The fog + hidden paddle LSTM depends on its memory.} A wipe at fog entry drops the share of
+    balls returned from 0.97--0.98 to 0.58, 0.20 and 0.13; seven steps in, to 0.13--0.21. A wipe before the
+    fog costs nothing (0.94--0.99), because the ball is seen again.
+  \item \textbf{The fog-only LSTM barely needs memory} (0.70--0.96 after a wipe at fog entry): with the
+    opponent's paddle in view it rebuilds its estimate.
+  \item \textbf{The CNN's frame stack carries nothing through the fog.} No wipe changes its share on fog +
+    hidden paddle (0.78--0.93 in every branch).
 \end{itemize}
-Unlike the LSTM agent, however, the attention agent is also hurt by a wipe \emph{before} the fog (0.23--0.97
-of balls returned). Its memory sets its attention query, so a wipe both erases what it remembers and
-disturbs where it looks. The attention block below separates the two.
 
-\paragraph{Timescale.} The forget gates of the fog + hidden paddle LSTMs, recomputed on their own games, give
-their ten slowest units half-lives of 18.5, 16.5 and 8.3 steps. These are about as long as the 14 steps the
-ball stays hidden. Clean LSTMs instead carry units that hardly forget at all.
+\paragraph{Timescale.} The memory is tuned to the occlusion. Recomputed on their own games, the forget gates
+of the fog + hidden paddle LSTMs give their ten slowest units half-lives of 18.5, 16.5 and 8.3 steps (medians
+per model), about the 14 steps the ball stays hidden. Clean LSTMs instead carry units that hardly forget.
 
-\subsection{The CNN without memory commits early}
-
-The CNN wins fog + hidden paddle with two seeds although no wipe of its frame stack changes anything. Its
-behaviour explains how. Four steps into the fog, its paddle is already 6--10\,px from where the ball will
-arrive, against 13--18\,px for the other agents, and it barely moves afterwards. It moves while the ball is
-visible, and its own paddle, which it always sees, carries the information through the fog. This also
-explains why a probe reads some of the hidden ball from its features (\Rsq{} 0.40--0.57) as well as from an
-untrained network's: the information is in its paddle, an input, not in a memory.
-
-\subsection{The attention agent remembers only what it looked at}
+\subsection{The attention agent remembers what its ball head lets in}
+\label{sec:attention}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{attention}
-  \caption{Where the (small) attention agent looks while a ball comes towards it. Top: one flight from the
-    evaluation games of a curriculum model on fog + hidden paddle, on the frames the agent sees. Bottom:
-    attention weight on three targets, aligned on the step the ball enters the agent's half, for every model
-    that plays its view (curriculum and from scratch). On the clean view nothing is hidden, so the alignment
-    is on the midline. Near arrival, the ball's $3\times3$ cells overlap the agent's paddle column.}
+  \caption{Where the attention agent looks while a ball comes towards it. Top: one returned flight of a
+    curriculum model on fog + hidden paddle, on the frames the agent sees, with the weights of its ball head
+    (green; circle: the ball, dotted while hidden). Bottom: for every model that plays its view, the ball
+    head's weight on the ball's $3\times3$ cells and the paddle head's weight on the opponent's paddle,
+    aligned on fog entry (clean: on the ball crossing the midline). Each model's heads are chosen on half of
+    its returned flights and plotted on the other half, so choosing the best of eight heads does not flatter
+    them. Dashed: uniform attention.}
   \label{fig:attention}
 \end{figure}
 
-\paragraph{Where it looks.} Figure~\ref{fig:attention} shows where the attention agent looks while a ball
-comes towards it.
-\begin{itemize}
-  \item \textbf{On fog + hidden paddle, the heads follow the ball while it is visible}, cell by cell. In the
-    eight steps before the fog, 0.35--0.80 of the weight is on the ball's $3\times3$ cells, against 0.18 for
-    uniform attention.
-  \item \textbf{When the ball vanishes, the attention lets it go.} It spreads out (0.01--0.24 on where the
-    ball really is) until the ball nears the agent's paddle.
-  \item \textbf{The fog-only models turn to the shortcut instead.} Inside the fog they put 0.27--0.69 of
-    their weight on the opponent's paddle, against about 0.06 for uniform attention.
-  \item \textbf{The clean models watch the opponent's paddle throughout} (0.29--0.62), consistent with their
-    collapse when it is hidden.
-\end{itemize}
-The wide agent's eight heads divide the work. Averaged over heads, its weight on the ball before the fog is
-lower (0.04--0.66 on fog + hidden paddle), but in four of its six models the best head follows the ball as
-closely as the small agent's heads (0.69--0.97, against 0.65--0.88). Attention weights are only a rough guide, though: two wide fog
-models put near-uniform weight on the opponent's paddle that they depend on completely. On fog + hidden paddle,
-then, the ball appears to enter memory through attention before the fog, and nothing in the fog is worth
-looking at. The test below checks this causally.
+\paragraph{Wipes.} The attention agent depends on its memory at least as much as the LSTM agent. On fog +
+hidden paddle, a wipe at fog entry leaves 0.04--0.25 of the balls returned; even on fog, with the opponent's
+paddle in view, it recovers less (0.23--0.72). Unlike the LSTM agent, it is also hurt by a wipe before the
+fog (0.23--0.89), because its memory sets its attention: a wipe both erases what it remembers and disturbs
+where it looks.
+
+\paragraph{Where it looks.} Each of its eight heads is free to look anywhere; Figure~\ref{fig:attention}
+follows, in each model, the head that looks most at the ball and the one that looks most at the opponent's
+paddle. On fog + hidden paddle, in three of the four winning models a head follows the ball cell by cell
+while it is visible (0.87--0.97 of its weight on the ball's cells in the eight steps before the fog, against
+0.18 for uniform attention) and lets it go when it vanishes (0.02--0.26). On fog, in every model a head turns
+to the opponent's paddle inside the fog (Section~\ref{sec:shortcut}). Natural attention is a weak
+guide on its own, however: per flight, attention to the ball before the fog does not predict the memory's
+error inside it consistently across models (Spearman $-0.11$ to $+0.42$).
 
 \paragraph{Blocking attention.}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.9\linewidth]{block}
-  \caption{The attention agents on fog + hidden paddle. Each incoming ball is replayed while, as long as the
+  \caption{The attention agent on fog + hidden paddle. Each incoming ball is replayed while, as long as the
     ball is visible before the fog, the agent may not attend to the $3\times3$ cells around it (\emph{block
-    the ball}). The control blocks the same number of cells at the mirrored height (\emph{block elsewhere}),
-    and \emph{erase the ball} removes the ball from the screen. Left: share of balls returned. Right: error of
-    the memory probe on the hidden ball's height. Lines: models; squares: the wide agent (its two
-    from-scratch seeds still learning return 0.76--0.83 of balls unblocked).}
+    the ball}). The control blocks the cells with the most attention elsewhere until they hold as much
+    attention as the ball's cells (\emph{block elsewhere}), and \emph{erase the ball} removes the ball from
+    the screen. Left: share of balls returned. Right: mean absolute error of the memory probe on the hidden
+    ball's height (one value of 71\,px drawn at the edge). Lines: models; hollow: curriculum. The two
+    from-scratch models that do not win still return 0.76 and 0.83 of the balls unblocked.}
   \label{fig:block}
 \end{figure}
 
-The attention agent's readout is the only path from the frame to its memory, so we can ask directly whether
+The readout is the only path from the frame to the attention agent's memory, so we can ask directly whether
 it remembers only what it attends to. While the ball is visible before the fog, we remove the cells around
-it from every head's softmax. Neither paddle's cells are ever blocked. Figure~\ref{fig:block} shows the
-result for the ten models that play this view: four small and six wide.
+it from every head's softmax; neither paddle's cells are ever blocked. As a control, a second branch removes
+the same attention mass from the cells the heads weight most outside the ball, and a third erases the ball
+from the screen (Figure~\ref{fig:block}).
 \begin{itemize}
-  \item \textbf{Blocking the ball makes the agent forget it.} In three small and three wide models, the
-    probe's error on the hidden ball rises from about 1--4\,px to 9--32\,px, and the share of balls returned
-    falls from 0.76--0.99 to 0.06--0.54.
-  \item \textbf{The control has no effect.} Blocking the same number of cells elsewhere changes the share
-    of balls returned by at most 0.03, so the effect is specific to the ball.
-  \item \textbf{In two small models, attention is the whole gate.} The block does as much damage as
-    erasing the ball from the screen.
-  \item \textbf{Four models are unaffected by the block but not by erasure}, plausibly because neighbouring
-    cells, whose receptive fields overlap the ball, still let it through. In one of them the block still
-    blurs the memory (probe error 11\,px); two are the wide models whose heads look at the ball least.
+  \item \textbf{Blocking the ball removes it from memory.} In the three winning models whose ball head
+    tracks it, the probe's error on the hidden ball rises from about 1\,px to 11--15\,px. In two of them the
+    agent then misses most balls (from 0.97 and 0.99 to 0.32 and 0.21).
+  \item \textbf{The same attention removed elsewhere changes nothing} in those two models (0.95 and 0.99 of
+    balls returned; probe error 1.9 and 0.8\,px), so the effect is specific to the ball, not to disturbing the
+    softmax.
+  \item \textbf{Blocking adds nothing to erasure.} With the ball erased, also blocking its cells changes the
+    share of balls returned by at most 0.05 in every winning model: the block acts only through the ball.
+  \item \textbf{Not every model gates the ball through one head.} In the third tracking model the memory
+    loses the ball (11\,px) but the agent still returns 0.95 of the balls. In the model whose heads barely
+    track the ball, blocking it costs little (0.89), while blocking its most-attended cells elsewhere costs
+    more (0.76): it reads the ball through other cells, whose receptive fields overlap it.
 \end{itemize}
-By contrast, the agents' natural attention to the ball does not predict their memory error flight by flight
-(Spearman $-0.12$ to $+0.50$). Only the intervention is informative.
 
-\subsection{Is the attention agent just too small?}
-\label{sec:wide}
+\subsection{The CNN does not need to see the ball}
+\label{sec:cnn}
 
-The attention agent is 7--9 times smaller than the other two, so its failure from scratch could be a matter
-of size. The wide attention agent (Table~\ref{tab:agents}) tests this. It is trained with exactly the same
-protocol, and the analyses above already report it beside the small one.
-
-Size explains part of the failure, but not all of it.
+The CNN wins fog + hidden paddle with two seeds, yet no wipe of its frame stack changes anything
+(Figure~\ref{fig:wipes}), and a probe reads no more of the hidden ball from its features than from an
+untrained CNN's (Section~\ref{sec:lstm}). Its play suggests early commitment: four steps into the fog, its
+paddle is already 6--9\,px from where the ball will arrive (LSTM 11--43\,px, attention 12--17\,px), and it
+makes only 4--19\% of its movement in the last four steps. Two interventions show that it needs neither early
+movement nor the ball.
 \begin{itemize}
-  \item \textbf{The wide agent plays like the small one wherever the small one already succeeded.} It wins
-    the clean view with every seed ($+18.7$ to $+20.0$). The curriculum again wins fog + hidden paddle with
-    every seed ($+18.1$ to $+20.6$), turning positive after 1.5--2.9M fine-tuning steps (small agent:
-    1.7--2.3M), and wins the hidden-paddle and fog views too ($+18.2$ to $+20.7$).
-  \item \textbf{Size alone explains the failures on the partly occluded views.} From scratch, the wide
-    agent wins the hidden-paddle and fog views with every seed ($+17.0$ to $+20.9$), where one small seed
-    of each stayed at $-20$.
-  \item \textbf{From scratch on fog + hidden paddle it no longer gets stuck.} Two small seeds stayed at
-    $-20$ for all 15M steps. All three wide seeds leave it. One wins ($+19.5$, positive after 3.2M steps), and
-    the other two are still improving when training stops ($-11.1$ and $-4.2$ in evaluation). The mean return
-    rises from $-7.0$ to $+1.4$.
-  \item \textbf{It is still much slower than the LSTM agent of the same size}, which wins with every seed
-    after 2--3M steps.
-  \item \textbf{How it plays does not change with size.} Its memory holds and uses the hidden ball, its
-    attention gates what enters memory, and under fog it plays through the opponent's paddle (Sections
-    3.2--3.5). One wide fog model even ignores the visible ball altogether: erasing it before the fog leaves
-    its returns unchanged (0.96), so it plays from the shortcut alone.
+  \item \textbf{Holding its paddle still} from the moment the ball leaves the opponent until four steps
+    after fog entry, when its frame stack no longer shows the ball, barely changes the share of balls it
+    returns (from 0.85--0.97 to 0.77--0.92).
+  \item \textbf{Erasing the ball} from every frame it sees, for the whole flight, barely changes it either
+    (0.80--0.94). The same erasure leaves the clean CNN 0.12 of the balls, and the fog + hidden paddle LSTM and attention agent 0.06--0.14.
 \end{itemize}
-Capacity, then, explains why the small attention agent fails some seeds on the easier occluded views, and
-part of why it stalls on the hardest one. But routing the frame through attention
-still makes the memory harder to learn from scratch than a plain LSTM at the same size, and clean
-pre-training remains the reliable way to learn it.
+The CNN does not carry the ball through the fog: it does not need to see this ball at all. Its rallies are
+regular, with arrival heights that vary by only 6--7\,px in the winning seeds, and it has learned where the
+ball will come back. Regular rallies alone do not explain it: the LSTM's are as regular (3--5\,px), yet
+the LSTM needs the ball. We have not tested how the regularity arises; the agent's own returns, which set up the
+opponent's next shot, are the likely source. The fog CNN goes further in the same direction: with the ball
+erased for the whole flight it still returns 0.92--0.98 of the balls, from the opponent's paddle alone.
+
+\subsection{Learning to remember}
+\label{sec:learning}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{learning}
+  \caption{Training return on fog + hidden paddle against steps played on that view (mean of the training
+    games in each 0.5M-step bin). Thin: seeds; thick: mean. Dashed: the attention agent's curriculum, whose
+    5M steps on this view follow 10M on the clean one.}
+  \label{fig:learning}
+\end{figure}
+
+Figure~\ref{fig:learning} shows how the fog + hidden paddle models were learned.
+\begin{itemize}
+  \item \textbf{The LSTM agent learns quickly and reliably}: every seed's training return turns positive
+    within 2.5--3.5M steps.
+  \item \textbf{The attention agent learns as fast, or not at all.} Its one winning seed turns positive at
+    3.5M steps, as fast as the LSTM. The other two stay near $-20$ for 4M and 10M steps and are still losing
+    when training stops at 15M ($-11$ and $-3$ in training).
+  \item \textbf{The curriculum makes it reliable.} Fine-tuned from its clean model, every seed turns
+    positive within 2--3.5M steps of the 5M.
+  \item \textbf{The CNN needs much longer} (9--11M steps), consistent with a strategy that only pays once
+    rallies have become regular (Section~\ref{sec:cnn}).
+\end{itemize}
+The same 5M-step fine-tuning is not enough for the CNN and LSTM: their fine-tunes are still losing at 5M
+($-15.5$ and $-8.9$ in evaluation). This is not negative transfer. Fine-tuned for the full 15M with the
+scratch schedule, every CNN and LSTM fine-tune wins ($+13.3$ to $+20.9$), and two LSTM fine-tunes learn
+faster than their scratch runs ($+9.1$ and $+13.8$ after 2M steps, against $-8.7$ and $-8.2$). Clean
+pre-training is a good start for every agent; for the attention agent it is the difference between failing
+and winning. One explanation, which we have not tested, is a chicken-and-egg problem: the attention agent's
+memory holds only what its attention lets in, and its attention is steered by its memory. A clean model
+already has heads that track the ball, and memory can build on them.
 
 \section{Related work}
 
 Deep Q-networks learned Atari games, Pong included, from pixels with four stacked frames
 \citep{mnih2013playing,mnih2015human}. \citet{hausknecht2015drqn} replaced the stack with an LSTM and showed
 that recurrence helps when frames are randomly blanked (flickering Pong). Our occlusion is structured
-instead: one region, always hidden, chosen so that memory, a shortcut, or an early commitment are all
+instead: one region, always hidden, so that memory, a shortcut, or a strategy that needs no tracking are all
 possible solutions. Attention-augmented agents \citep{mott2019attention} let an LSTM query a spatial feature
 map, which makes where the agent looks visible; we use a simplified version and intervene on that attention
 rather than only inspecting it. Linear probes for Atari state follow AtariARI \citep{anand2019atariari}.
-Shortcut learning \citep{geirhos2020shortcut} was diagnosed for Pong by SCoBots
-\citep{delfosse2024scobots} and HackAtari \citep{delfosse2024hackatari}. We show that the shortcut persists
-under fog and how it is read. Clean-then-hard training is a simple curriculum \citep{bengio2009curriculum}.
+Shortcut learning \citep{geirhos2020shortcut} was diagnosed for Pong by SCoBots \citep{delfosse2024scobots}
+and HackAtari \citep{delfosse2024hackatari}; we show that the shortcut persists under fog. Clean-then-hard
+training is a simple curriculum \citep{bengio2009curriculum}.
 
 \section{Limitations}
 
 \begin{itemize}
-  \item \textbf{Scale.} We use three seeds per condition and a single game. Several findings rest on one
-    or two models, such as the attention agent from scratch and the fog-only attention agents.
-  \item \textbf{Size confound.} The attention agent differs from the others in size as well as in
-    attention. The wide agent removes the size difference, and every finding replicates on it except the
-    learning speed of Section~\ref{sec:wide}. Its two unfinished from-scratch seeds on fog + hidden paddle
-    might win with a longer budget.
-  \item \textbf{Evaluation.} It uses the stochastic policy, against the built-in opponent only.
-  \item \textbf{Mechanism.} Reading the shortcut as an inference from where the ball met the opponent's
-    paddle fits our data but is not tested directly.
-  \item \textbf{Training noise.} The 15M-step fine-tuning controls were partly resumed after power cuts
-    with a fresh optimiser; this is recorded in their checkpoints.
+  \item \textbf{Scale.} Three seeds per condition and a single game. The learning result rests on 1 of 3
+    seeds against 3 of 3 (Fisher's exact test, $p=0.4$), and several mechanistic findings on two to four
+    models.
+  \item \textbf{Interventions leave the training distribution.} An erased or mirrored paddle, a blocked
+    attention cell and a wiped memory are all states the agents never saw in training. We pair each with a
+    control (the clean CNN under the paddle edits, attention removed elsewhere, a wipe before the fog), but
+    a control cannot rule out every non-specific effect. The probes are fit on natural states, so their
+    errors under an intervention are only indicative.
+  \item \textbf{Evaluation} uses the stochastic policy against the built-in opponent only.
+  \item \textbf{Training history.} Two runs were resumed after interruptions: the attention agent's
+    fog + hidden paddle seed 2 after a non-finite loss at 1.34M steps (from its 1.0M checkpoint, with a fresh
+    optimiser), and the 15M-step fine-tuning controls after power cuts. Both are recorded with the
+    checkpoints.
 \end{itemize}
 
 \section{Conclusion}
 
 Agents learn to remember the ball only when nothing else will do. With the opponent's paddle in view, even a
-fog over their own half leaves every architecture playing through the shortcut. Without it, the LSTM agent
-carries the hidden ball in its memory and acts on it. The attention agent does too, but its memory holds
-only what its attention let in. The memoryless CNN wins without remembering by committing before the ball
-disappears. Each architecture used its own tools, and the one with the most structured tools needed the
-easier game first to learn to use them.
+fog over their own half leaves every agent depending on the shortcut. Without it, the LSTM agent carries the
+hidden ball in its memory and acts on it. The attention agent does too, and when one of its heads tracks the
+ball, what it remembers is what that head let in. The memoryless CNN wins without tracking the ball at all, by learning where it comes back. The attention
+agent, whose memory and attention depend on each other, needed the easier game first to learn to use them.
 
 \bibliographystyle{plainnat}
 \bibliography{refs}

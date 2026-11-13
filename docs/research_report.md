@@ -390,6 +390,42 @@ return after k M steps on fog + mask (per seed):
   randomness, so the attribution to the schedule rests on two seeds diverging within 2M steps. The last 2.5M
   steps of the controls resumed after power cuts with a fresh optimizer (recorded in the checkpoints).
 
+## Review and controls (2026-11-13)
+
+Three independent reviews of the paper (narrative, a sceptical "Reviewer 2", clarity and figures) and the
+user's decisions changed the paper as follows. The paper now shows only the CNN, the LSTM and the wide
+attention agent, with three seeds (more seeds, E15, were started and stopped at the user's request).
+
+- **The shift test does not show how the paddle is read (E5c, reanalysed).** `mean_shift_by_d` is the signed
+  paddle displacement per shift direction. Of the 23 fog models that play, 6 move against the shift, 1 with
+  it, 7 the same way whichever way the paddle is shifted, and 9 in one direction only or hardly at all. The
+  "inferred return angle" reading is withdrawn; what stands is that a 4-8 px shift costs most balls
+  (upward shifts more than downward) while the clean CNN is unaffected.
+- **The attention block is specific to the ball where it matters (E16).** Wide models, fog + hidden paddle,
+  share of balls returned: control / ball blocked / same attention blocked elsewhere / ball erased / erased
+  and blocked:
+  - scratch s1: 0.97 / 0.32 / 0.95 / 0.15 / 0.10 (attention removed: 0.22 / 0.22)
+  - curriculum s2: 0.99 / 0.21 / 0.99 / 0.10 / 0.10 (0.23 / 0.23)
+  - curriculum s1: 1.00 / 0.95 / 1.00 / 0.04 / 0.04 (memory error under the ball block 11.4 px; the
+    matched block could only remove 0.13 against 0.42)
+  - curriculum s3: 0.98 / 0.89 / 0.76 / 0.10 / 0.10 (weak ball head; other cells matter more)
+  - unfinished scratch s2 / s3: 0.83 / 0.81 / 0.21 and 0.76 / 0.37 / 0.53 (any block disturbs them)
+  The second probe (own paddle height) is not usable: it reads the paddle through ball-correlated features
+  and its error explodes under erasure (up to 174 px).
+- **The CNN does not track the ball on fog + hidden paddle (E17).** Share of balls returned, control / paddle
+  held until fog entry / held 4 steps more / ball erased for the whole flight: CNN fog + hidden paddle
+  0.85-0.97 / 0.80-0.94 / 0.77-0.92 / 0.80-0.94; clean CNN blind 0.12; fog CNN blind 0.92-0.98 (it plays
+  from the opponent's paddle alone); wide attention fog + hidden paddle blind 0.06-0.14. "Early
+  commitment" (E8) was the visible side of a policy that goes where the ball usually comes back.
+- **Learning (E14).** Training return turns positive on fog + hidden paddle after 2.5-3.5M steps for every
+  LSTM seed, 3.5M for the one wide attention seed that learns (the other two stall for 4M and 10M steps and
+  end at -11 and -3), 2-3.5M of the 5M for the curriculum, 9-11M for the CNN.
+- **Attention heads, chosen without selection bias.** `attention_maps.py` now stores per-head curves on even
+  and odd flights; the paper's figure picks each model's ball head and paddle head on one half and plots the
+  other. Fog + hidden paddle winners: ball head 0.87-0.97 before the fog in 3 of 4 (curriculum s3: 0.36),
+  0.02-0.26 inside it; fog models: a paddle head at 0.34-0.75 inside the fog (uniform 0.06).
+- References now carry DOIs or arXiv IDs, each checked against Crossref or arXiv.
+
 ## Reproducing
 
 Every result file, the script that writes it and where it is used: `docs/data.md`. Locally,

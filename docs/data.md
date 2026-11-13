@@ -49,10 +49,17 @@ the host for the attention strip of Figure `attention`.
 | E7-E9 | play statistics, saliency, attention mass, LSTM timescales | `summarize_rollouts.py` | `analysis/rollout_summary.jsonl` | paper 3.3 (timescales), 3.4 (early commitment); report Q2/Q3 (saliency), Q5 (behaviour, timescales), Q6 |
 | E10 | blocking attention to the ball | `attention_block.py` | `analysis/attention_block.jsonl` | Fig. `block`; paper 3.5; report Q4 |
 | E11 | scripted reference players | `scripted_baselines.py` | `analysis/scripted_baselines.jsonl` | report Q2/Q3 |
-| E13 | attention over a flight | `attention_maps.py summary` / `strip`; `attention_heads.py` (per head, printed) | `analysis/attention_maps.json` (attn_lstm), `analysis/attention_maps_attn_lstm_wide.json`, `analysis/attention_strip.npz` | Fig. `attention`; paper 3.5; report Q4 |
+| E13 | attention over a flight | `attention_maps.py summary` / `strip`; `attention_heads.py` (per head, printed) | `analysis/attention_maps.json` (attn_lstm), `analysis/attention_maps_attn_lstm_wide.json` (with per-head curves on even and odd flights), `analysis/attention_strip.npz` (the wide agent, curriculum fog + hidden paddle seed 2) | Fig. `attention`; paper 3.4; report Q4 |
 | E12b | the wide agent on mask and fog | `run_wide.sh` (`VIEWS`, `FT_VIEWS`), `evaluate_sweep.py --archs attn_lstm_wide` | models in `checkpoints/*/attn_lstm_wide/`; rows in `evaluations/sweep_stochastic.jsonl` | paper 3.6; report Q1 |
 | E12c | E2-E5c, E7, E10, E13 on attn_lstm_wide | `run_wide_analyses.sh` | rows added to the files above (`arch` = `attn_lstm_wide`) | paper 3.6; report Q4 (E12c) |
+| E14 | learning curves (training return per 0.5M steps, every finished run) | `learning_curves.py` (host: reads `logs/`) | `analysis/learning_curves.json` | Fig. `learning`; paper 3.6 |
+| E15 | more seeds (4-6) for fog + hidden paddle | `run_sweep.sh` | stopped at the user's request; partial runs in `archive/seeds_4-6_stopped/` | none |
+| E16 | attention block controls: same attention removed elsewhere, erase + block | `attention_block.py --controls` | `analysis/attention_block_controls.jsonl` | Fig. `block`; paper 3.4; report (review) |
+| E17 | hold the paddle while the ball is visible; erase the ball for the whole flight | `commit_hold.py` | `analysis/commit_hold.jsonl` | paper 3.2, 3.5; report (review) |
 | all | every table of the report | `report_tables.py` | `analysis/report.json` (derived; regenerate after new results) | report |
+
+The paper (since 2026-11-13) shows only the CNN, the LSTM and the wide attention agent (`attn_lstm_wide`); the
+small attention agent's rows stay in the files and in the report's history.
 
 Figures: `scripts/make_figures.py` reads `analysis/` and `evaluations/` and writes `figures/<name>.pdf/.png`
 (`environments` and `views` need no data). The paper (`paper/main.tex`) includes them from `figures/`.
