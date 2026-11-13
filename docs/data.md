@@ -36,7 +36,7 @@ the host for the attention strip of Figure `attention`.
 
 | exp | question | script | output | used in |
 |---|---|---|---|---|
-| E1, E12 | how well each model plays each view | `evaluate_sweep.py` | `evaluations/sweep_stochastic.jsonl` (one row per model x view, with its 30 games) | Fig. `returns`; paper 3.1, 3.6; report Q1 |
+| E1, E12 | how well each model plays each view | `evaluate_sweep.py` | `evaluations/sweep_stochastic.jsonl` (one row per model x view, with its 30 games; also the step-3 rows of intermediate checkpoints, so filter on `checkpoint_file`) | Fig. `returns`; paper 3.1, 3.6; report Q1 |
 | E6 | fine-tune controls (15M steps, reinitialised core) | `run_controls.sh`, `evaluate_sweep.py --finetune-tag` | `evaluations/controls_stochastic.jsonl`; models in `checkpoints/finetune/*/clean_10.0M_to_fog_mask__*` | paper 3.1; report Q6 |
 | (step 2) | how long the fog hides the ball | `fog_exposure.py` | `evaluations/fog_exposure.jsonl` | paper 3.3; report Q5 |
 | E2 | recordings of the evaluation games | `record_rollouts.py` | `analysis/rollouts/<run>__final.npz` + `.json` (host) | input of E3, E7-E9, E13 |
@@ -50,7 +50,8 @@ the host for the attention strip of Figure `attention`.
 | E10 | blocking attention to the ball | `attention_block.py` | `analysis/attention_block.jsonl` | Fig. `block`; paper 3.5; report Q4 |
 | E11 | scripted reference players | `scripted_baselines.py` | `analysis/scripted_baselines.jsonl` | report Q2/Q3 |
 | E13 | attention over a flight | `attention_maps.py summary` / `strip`; `attention_heads.py` (per head, printed) | `analysis/attention_maps.json` (attn_lstm), `analysis/attention_maps_attn_lstm_wide.json`, `analysis/attention_strip.npz` | Fig. `attention`; paper 3.5; report Q4 |
-| E12c | E2-E4, E10, E13 on attn_lstm_wide | `run_wide_analyses.sh` | rows added to the files above | report Q4 (E12c) |
+| E12b | the wide agent on mask and fog | `run_wide.sh` (`VIEWS`, `FT_VIEWS`), `evaluate_sweep.py --archs attn_lstm_wide` | models in `checkpoints/*/attn_lstm_wide/`; rows in `evaluations/sweep_stochastic.jsonl` | paper 3.6; report Q1 |
+| E12c | E2-E5c, E7, E10, E13 on attn_lstm_wide | `run_wide_analyses.sh` | rows added to the files above (`arch` = `attn_lstm_wide`) | paper 3.6; report Q4 (E12c) |
 | all | every table of the report | `report_tables.py` | `analysis/report.json` (derived; regenerate after new results) | report |
 
 Figures: `scripts/make_figures.py` reads `analysis/` and `evaluations/` and writes `figures/<name>.pdf/.png`

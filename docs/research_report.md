@@ -27,10 +27,13 @@ CNN, LSTM and attention-LSTM agents learn to play"). Runs interrupted by power c
    fine-tuning recipe: given the scratch budget and learning-rate schedule, every fine-tune wins, the LSTM's
    mostly faster than from scratch and the CNN's more reliably.
 7. **Every model is a specialist.** Fog + mask models lose on every other view, clean ones on every fogged one.
-8. **Size explains only part of the attention agent's failure from scratch (E12).** A wider attention-LSTM as
-   large as the LSTM (1.98M vs 2.01M parameters) no longer stalls on fog + mask: all three seeds leave -20,
-   one wins (+19.5) and two are still improving at 15M (-11.1, -4.2; mean +1.4 against -7.0 for the small
-   agent). The LSTM wins with every seed after 2-3M steps. Its curriculum wins with every seed, as before.
+8. **Size explains only part of the attention agent's failure from scratch (E12, E12b).** A wider
+   attention-LSTM as large as the LSTM (1.98M vs 2.01M parameters) wins mask and fog from scratch with every
+   seed (+17.0 to +20.9), where one small seed of each stayed at -20: those failures were size. On fog + mask
+   it no longer stalls: all three seeds leave -20, one wins (+19.5) and two are still improving at 15M
+   (-11.1, -4.2; mean +1.4 against -7.0 for the small agent), while the LSTM wins with every seed after 2-3M
+   steps. Every wide curriculum run wins (9 of 9). Its memory, attention and shortcut
+   findings replicate those of the small agent (E12c).
 
 ## Setup in one paragraph
 
@@ -74,14 +77,23 @@ Frozen models on their own training view (final checkpoints; mean return over 3 
   | scratch clean s1/s2/s3 | +18.8 / +20.0 / +18.7 | +15.7 / -20.2 / -6.8 | about -20.6 | about -20.8 |
   | scratch fog + mask s1/s2/s3 | about -20 | about -20 | -19.5 / -16.7 / -21.0 | **+19.5 / -11.1 / -4.2** |
   | curriculum fog + mask s1/s2/s3 | about -20.6 | about -20.0 | about -20.7 | **+18.1 / +20.6 / +19.1** |
+  | scratch mask s1/s2/s3 (E12b) | +0.1 (mean) | **+20.5 / +17.8 / +20.9** | about -20.7 | about -20.6 |
+  | curriculum mask s1/s2/s3 (E12b) | -8.0 (mean) | **+19.4 / +19.6 / +18.2** | about -20.7 | about -20.4 |
+  | scratch fog s1/s2/s3 (E12b) | -17.5 (mean) | about -20.8 | **+17.0 / +19.4 / +19.2** | about -20.7 |
+  | curriculum fog s1/s2/s3 (E12b) | -14.2 (mean) | -19.4 (mean) | **+19.3 / +20.7 / +19.0** | about -20.8 |
 
   The small agent's failed seeds sat at -20 for all 15M steps; the wide ones climb (training return per 1M,
   s2: -20 until 3M, -16 at 9M, -11 at 15M; s3: -20 until 8M, then -17, -11, -6, -3 at 15M). The wide seed
   that wins turns positive after 3.2M steps; the curriculum fine-tunes after 1.5-2.9M (small agent 1.7-2.3M).
   Like the small clean agent, two of three wide clean models lose without the enemy paddle. Scratch fog + mask
   seed 2 stopped on a non-finite PPO loss at 1.34M and was resumed by hand from its 1.0M checkpoint (fresh
-  optimiser), see its train.log. Since the wide agent does not reliably learn fog + mask from scratch, it was
-  not trained on mask or fog.
+  optimiser), see its train.log.
+- **E12b, the wide agent on mask and fog (2026-11-13).** Trained afterwards so that the attention agent can be
+  discussed at the LSTM's size on every view. Every run wins its view: from scratch, where the small agent
+  lost one seed of each (-20.2 on mask, -20.0 on fog), and fine-tuned. Its own-view mean is +19.7 (mask) and
+  +18.5 (fog) from scratch, against +6.6 and +6.8 for the small agent and +20.6 / +20.4 for the LSTM. The six
+  fine-tunes were interrupted by a power cut at about 10.7M steps (2026-11-13 03:20) and restarted from their
+  own 10.0M starting checkpoint, so they ran the full 5M steps; see their train.log.
 - **Fog-only models need the enemy paddle.** Fog-trained models of all three architectures (scratch and
   fine-tuned) lose about -20 on fog + mask, i.e. when only the enemy paddle is taken away. This is the first
   evidence for the shortcut of Q3: under fog, the agents read where the ball went off the enemy paddle.
@@ -185,10 +197,10 @@ The probe is fit on the model's own recorded games and applied to the replays (n
 - Passive correlation (attention on the ball before the fog against memory error inside it) shows no
   consistent relation (Spearman -0.12 to +0.50): only the intervention is informative.
 
-### E12c: the memory and attention analyses on the size-matched agent (2026-11-12, clean and fog + mask models)
+### E12c: the analyses on the size-matched agent (clean and fog + mask models 2026-11-12, mask and fog 2026-11-13)
 
-`scripts/run_wide_analyses.sh` reran E2, E3, E4, E10 and E13 on the 9 attn_lstm_wide models with the small
-agent's settings; `scripts/attention_heads.py` adds a per-head view. Mask and fog models follow when E12b ends.
+`scripts/run_wide_analyses.sh` reran E2-E5c, E7, E10 and E13 on the 21 attn_lstm_wide models with the small
+agent's settings; `scripts/attention_heads.py` adds a per-head view.
 Wide fog + mask models: scratch s1 (wins), s2 / s3 (still learning, -11.1 / -4.2), curriculum s1-s3 (win).
 
 | fog + mask, own view | small attn_lstm (models that win) | wide attn_lstm_wide |
@@ -228,6 +240,39 @@ Wide fog + mask models: scratch s1 (wins), s2 / s3 (still learning, -11.1 / -4.2
   this model. Its current-height probe is stable (0.87 in both); the paper uses only that probe.
 - The probes file has one line of NUL bytes (line 64, an earlier power cut); readers skip it and no row is
   missing from the analyses above.
+
+**Mask and fog wide models (E12b models, 2026-11-13).**
+
+| fog models, own view | small attn_lstm (models that win) | wide attn_lstm_wide |
+|---|---|---|
+| E5 erase / mirror the enemy paddle | -20.1 to -21.0 | -20.5 to -21.0 (all 6) |
+| E5c balls returned, unshifted -> worst 4-8 px shift | 0.90-0.96 -> 0.12-0.18 | 0.90-0.99 -> 0.03-0.18 |
+| E5c gain (paddle move per px of shift) | -2.04 to -0.67, one +2.32 | -1.22 to -0.79 (3 models); about 0 (3: -0.06, -0.04, +0.01) |
+| E4 return rate: control / wipe at fog entry | 0.90-0.96 / 0.17-0.61 | 0.90-0.99 / 0.23-0.72 |
+| E10 erase the ball before the fog | 0.20-0.49 | 0.26-0.39 in 3; 0.77 (ft s3), 0.82 (s2), **0.96 (s3)** |
+| E10 block attention to the ball | 0.33 (scratch s1), 0.62-0.94 others | 0.38 (ft s2), 0.80-0.97 others; sham no effect |
+| E13 mean-over-heads attention on the enemy paddle inside the fog (uniform 0.06) | 0.27-0.69 | 0.06-0.32 |
+| E3 / E3b hidden-ball R^2 8+ steps in: trained / untrained | 0.98-1.00 / 0.97-0.98 | 0.97-0.99 / 0.95-0.98 |
+
+- **The shortcut replicates fully.** Every wide fog agent loses every point without a correct enemy paddle
+  and most balls under a 4-8 px shift. The direction rule of E5c holds less cleanly: three move opposite to
+  the shift (as 16 of the 17 playing models of the E5c table in Q2 did), three respond non-monotonically (gain near 0)
+  but are disrupted as much.
+- **Scratch s3 plays from the shortcut alone.** Erasing the visible ball before the fog leaves it returning
+  0.96 of balls (control 0.96), memory wipes barely matter (0.56 at entry, 0.80 seven steps in), its heads
+  barely look at the ball (best head 0.14), yet erasing the enemy paddle costs every point. It returns more
+  balls than the scripted copy-the-enemy player (0.55, E11), so it reads more than the paddle's height.
+- **Under fog, decodability is again not memory**: the untrained twin reads the hidden ball as well as the
+  trained network (as for the small agent and the LSTM).
+- **Attention weight is a weak proxy for what reaches memory.** The fog agents use the enemy paddle
+  completely, yet two wide models put near-uniform attention on its cells (0.06 and 0.11; uniform 0.06). The same holds
+  for the ball on mask: winning models of both sizes look at it at about the uniform rate (small scratch s2
+  0.07, wide scratch s2 0.14 best head), plausibly because neighbouring cells' receptive fields cover the
+  object. Only the interventions (E5, E10) say what is used.
+- **Mask models.** E5 changes nothing (sanity check: the paddle is already hidden). Memory wipes cost little
+  at fog entry (0.59-0.98 of balls; the ball stays visible) except curriculum s2 (0.41).
+- Like the small agent, the wide mask and fog models lose on clean (wide: +0.1 and -17.5 from scratch, -8.0
+  and -14.2 fine-tuned): specialists again.
 
 ## Q2 Perception and Q3 the enemy-paddle shortcut
 
